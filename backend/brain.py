@@ -37,13 +37,15 @@ def analyze_news(ticker, title, summary):
     
     Task:
     1. Determine the sentiment of the news regarding {ticker} (POSITIVE, NEGATIVE, NEUTRAL).
-    2. Suggest a trading signal (BUY, SELL, HOLD). Be conservative; only suggest BUY/SELL if the news is significant and has clear price impact potential.
-    3. Provide a very short reason (max 1 sentence) in Portuguese.
+    2. Suggest a trading signal (BUY, SELL, HOLD). Be conservative.
+    3. Estimate the potential short-term price impact as a percentage (e.g. "+2%", "-5%", "0%").
+    4. Provide a very short reason (max 1 sentence) in Portuguese.
     
     Output format (JSON only):
     {{
         "signal": "BUY/SELL/HOLD",
         "sentiment": "POSITIVE/NEGATIVE/NEUTRAL",
+        "impact": "+/-X%",
         "reason": "Resumo do motivo em pt-br"
     }}
     """

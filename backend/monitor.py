@@ -98,12 +98,20 @@ def main():
                             print(f"Analysis: {analysis}")
                             
                             if analysis.get('signal') in ['BUY', 'SELL']:
-                                msg = f"{tickers[0]}: {analysis['signal']} - {analysis['reason']}"
-                                print(f"Sending Notification to {len(tokens)} users: {msg}")
+                                # New V3 Title Format: "PETR4: BUY"
+                                push_title = f"{tickers[0]}: {analysis['signal']}"
                                 
+                                # New V3 Body Format: "Impact: +2% - Reason..."
+                                impact = analysis.get('impact', '?')
+                                msg = f"Est: {impact}\n{analysis['reason']}"
+                                
+                                print(f"Sending V3 Notification: {push_title} -> {msg}")
+                                
+                                push_data = {"url": link}
+
                                 for user_token in tokens:
                                     try:
-                                        send_push_notification(user_token, "[Cloud ☁️] B3 Signal Detected!", msg)
+                                        send_push_notification(user_token, push_title, msg, data=push_data)
                                     except Exception as push_err:
                                         print(f"Failed to send to {user_token}: {push_err}")
                             
