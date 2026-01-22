@@ -22,3 +22,22 @@ web-build/
 .DS_Store
 backend/secrets.py
 mobile/notifinvest-firebase-adminsdk-fbsvc-ebec4f88aa.json
+
+# Android
+*.apk
+*.ap_
+*.dex
+*.class
+bin/
+gen/
+local.properties
+.gradle/
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+mobile/android/app/build/
+mobile/android/build/
+
+# Backend Data
+backend/tokens.json

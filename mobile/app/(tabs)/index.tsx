@@ -41,7 +41,7 @@ export default function HomeScreen() {
 
   return (
     <View style={styles.container}>
-      <Text style={styles.header}>B3 Signals</Text>
+      <Text style={styles.header}>NotifyInvest</Text>
 
       {/* Token hidden for production aesthetics. Check console logs if needed. */}
 
