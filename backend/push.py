@@ -14,6 +14,13 @@ def send_push_notification(token, title, message, data=None):
         print("No push token provided. Skipping notification.")
         return
 
+    # Handle Mock Tokens (for Web/Emulator testing without EAS)
+    if not token.startswith("ExponentPushToken") and "MOCK_TOKEN" in token:
+        print(f"--> [MOCK PUSH] Simulating notification to {token}")
+        print(f"    Title: {title}")
+        print(f"    Body: {message}")
+        return
+
     try:
         response = PushClient().publish(
             PushMessage(to=token,

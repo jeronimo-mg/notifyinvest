@@ -1,0 +1,6 @@
+feedparser
+google-generativeai
+exponent_server_sdk
+requests
+flask
+flask-cors

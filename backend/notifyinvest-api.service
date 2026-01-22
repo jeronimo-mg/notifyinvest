@@ -1,0 +1,14 @@
+[Unit]
+Description=NotifyInvest API Server
+After=network.target
+
+[Service]
+User=opc
+WorkingDirectory=/opt/notifyinvest
+ExecStart=/opt/notifyinvest/venv/bin/python backend/api.py
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=NotifyInvest Backend Service
+After=network.target
+
+[Service]
+User=opc
+WorkingDirectory=/home/opc/notifyinvest
+ExecStart=/home/opc/notifyinvest/venv/bin/python backend/monitor.py
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

@@ -21,3 +21,4 @@ web-build/
 # Mac/Linux system files
 .DS_Store
 backend/secrets.py
+mobile/notifinvest-firebase-adminsdk-fbsvc-ebec4f88aa.json

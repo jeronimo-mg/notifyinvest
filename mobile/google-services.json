@@ -1,0 +1,39 @@
+{
+  "project_info": {
+    "project_number": "846718889070",
+    "project_id": "notifinvest",
+    "storage_bucket": "notifinvest.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:846718889070:android:6a28302bb1a7d34ea00a7f",
+        "android_client_info": {
+          "package_name": "com.notifyinvest.mobile"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "846718889070-aa1u331sejuvh9tbd29u04de3c8sgqmt.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAuCC1FbwyfHYJL0BLieg2lGa8LVZc0qr0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "846718889070-aa1u331sejuvh9tbd29u04de3c8sgqmt.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

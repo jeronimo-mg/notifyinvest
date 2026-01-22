@@ -20,7 +20,7 @@ except ImportError:
     from backend.push import send_push_notification
 
 # Configuration
-POLL_INTERVAL = 300 # 5 minutes
+POLL_INTERVAL = 30 # 30 seconds for testing
 SEEN_FILE = "seen_news.json"
 EXPO_TOKEN = None # Will be set dynamically or loaded from config
 
@@ -40,20 +40,33 @@ def main():
     
     seen_links = load_seen()
     
-    # Try to load token from a file if it exists (saved by server/API in future)
-    # For now, user might paste it here or we run without push
-    token = None 
-    if os.path.exists("token.txt"):
-        with open("token.txt", "r") as f:
-            token = f.read().strip()
-            
+    # Prepare for multi-user support
+    import json
+    token_file = os.path.join(os.path.dirname(__file__), 'tokens.json')
+
     while True:
+        # Load tokens dynamically every loop (so new users get added instantly)
+        tokens = []
+        if os.path.exists(token_file):
+            try:
+                with open(token_file, 'r') as f:
+                    tokens = json.load(f)
+            except:
+                tokens = []
+        
+        # Fallback for migration (if token.txt still exists)
+        legacy_token_file = os.path.join(os.path.dirname(__file__), 'token.txt')
+        if os.path.exists(legacy_token_file):
+             with open(legacy_token_file, 'r') as f:
+                t = f.read().strip()
+                if t and t not in tokens: tokens.append(t)
+
         # Logic: If we found new items, we want to check again immediately (Burst Mode)
         # because staying up-to-date during a news flood is critical.
         # If we found nothing new, we relax and wait POLL_INTERVAL.
         found_any_new = False
 
-        print(f"Checking {len(RSS_FEEDS)} feeds...")
+        print(f"Checking {len(RSS_FEEDS)} feeds for {len(tokens)} users...")
         for feed_url in RSS_FEEDS:
             try:
                 feed = feedparser.parse(feed_url)
@@ -86,11 +99,14 @@ def main():
                             
                             if analysis.get('signal') in ['BUY', 'SELL']:
                                 msg = f"{tickers[0]}: {analysis['signal']} - {analysis['reason']}"
-                                print(f"Sending Notification: {msg}")
-                                if token:
-                                    send_push_notification(token, "B3 Signal Detected!", msg)
-                                else:
-                                    print("No Expo Token to send push.")
+                                print(f"Sending Notification to {len(tokens)} users: {msg}")
+                                
+                                for user_token in tokens:
+                                    try:
+                                        send_push_notification(user_token, "[Cloud ☁️] B3 Signal Detected!", msg)
+                                    except Exception as push_err:
+                                        print(f"Failed to send to {user_token}: {push_err}")
+                            
                         except Exception as e:
                             print(f"Analysis failed: {e}")
                                 
