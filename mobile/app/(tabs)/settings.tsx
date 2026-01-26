@@ -1,8 +1,7 @@
 import { useState, useEffect } from 'react';
-import { StyleSheet, TextInput, View, TouchableOpacity, Alert, ActivityIndicator, ScrollView, Text } from 'react-native';
+import { StyleSheet, TextInput, View, TouchableOpacity, Alert, ActivityIndicator, Text } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import Constants from 'expo-constants';
-import { Platform } from 'react-native';
 
 import ParallaxScrollView from '@/components/parallax-scroll-view';
 import { ThemedText } from '@/components/themed-text';
@@ -18,6 +17,8 @@ export default function SettingsScreen() {
   // Lists
   const [whitelist, setWhitelist] = useState<string[]>([]);
   const [blacklist, setBlacklist] = useState<string[]>([]);
+  const [sourceWhitelist, setSourceWhitelist] = useState<string[]>([]); // New State
+  const [availableSources, setAvailableSources] = useState<string[]>([]); // New State
   const [newTicker, setNewTicker] = useState('');
 
   const [loading, setLoading] = useState(false);
@@ -25,6 +26,7 @@ export default function SettingsScreen() {
 
   useEffect(() => {
     loadSettings();
+    loadSources(); // Load available sources
   }, []);
 
   const getPushToken = async () => {
@@ -55,6 +57,10 @@ export default function SettingsScreen() {
         setMinSell(data.min_sell?.toString() || '0');
         setWhitelist(data.whitelist || []);
         setBlacklist(data.blacklist || []);
+        // If source_whitelist is empty, it means ALL sources (default behavior logic depends on backend)
+        // But backend logic says: "if source_whitelist and len > 0: check".
+        // So empty means ALL.
+        setSourceWhitelist(data.source_whitelist || []);
       }
     } catch (e) {
       console.error("Failed to load settings", e);
@@ -63,6 +69,19 @@ export default function SettingsScreen() {
       setLoading(false);
     }
   };
+
+  const loadSources = async () => {
+    try {
+      const res = await fetch(`http://${SERVER_IP}:5000/sources`);
+      if (res.ok) {
+        const sources = await res.json();
+        setAvailableSources(sources);
+      }
+    } catch (e) {
+      console.error("Failed to load sources", e);
+    }
+  };
+
 
   const saveSettings = async () => {
     setSaving(true);
@@ -79,7 +98,8 @@ export default function SettingsScreen() {
         min_buy: parseInt(minBuy) || 0,
         min_sell: parseInt(minSell) || 0,
         whitelist: whitelist,
-        blacklist: blacklist
+        blacklist: blacklist,
+        source_whitelist: sourceWhitelist
       };
 
       const res = await fetch(`http://${SERVER_IP}:5000/preferences`, {
@@ -141,13 +161,40 @@ export default function SettingsScreen() {
       </ThemedView>
 
       <ThemedText>
-        Controle granular das suas notificações.
+        Personalize suas notificações e fontes.
       </ThemedText>
 
       {loading ? (
         <ActivityIndicator size="large" color="#2196F3" />
       ) : (
         <View style={styles.form}>
+
+          {/* Sources Section */}
+          <ThemedText type="defaultSemiBold" style={styles.sectionTitle}>📡 Fontes de Notícias</ThemedText>
+          <ThemedText style={styles.helperText}>Selecione quais fontes você confia. Se nenhuma estiver selecionada, você receberá de TODAS.</ThemedText>
+
+          <View style={styles.sourcesContainer}>
+            {availableSources.map(source => {
+              const isSelected = sourceWhitelist.includes(source);
+              return (
+                <TouchableOpacity
+                  key={source}
+                  style={[styles.sourceChip, isSelected && styles.sourceChipSelected]}
+                  onPress={() => {
+                    if (isSelected) {
+                      setSourceWhitelist(sourceWhitelist.filter(s => s !== source));
+                    } else {
+                      setSourceWhitelist([...sourceWhitelist, source]);
+                    }
+                  }}
+                >
+                  <Text style={[styles.sourceChipText, isSelected && styles.sourceChipTextSelected]}>
+                    {source} {isSelected ? '✓' : ''}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
 
           {/* Thresholds Section */}
           <ThemedText type="defaultSemiBold" style={styles.sectionTitle}>💰 Limites de Preço</ThemedText>
@@ -246,6 +293,32 @@ export default function SettingsScreen() {
 }
 
 const styles = StyleSheet.create({
+  sourcesContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 10,
+  },
+  sourceChip: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#ccc',
+    backgroundColor: '#fff',
+  },
+  sourceChipSelected: {
+    backgroundColor: '#E3F2FD',
+    borderColor: '#2196F3',
+  },
+  sourceChipText: {
+    fontSize: 12,
+    color: '#666',
+  },
+  sourceChipTextSelected: {
+    color: '#1565C0',
+    fontWeight: 'BOLD',
+  },
   headerImage: {
     color: '#808080',
     bottom: -90,

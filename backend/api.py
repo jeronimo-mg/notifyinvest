@@ -12,6 +12,12 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Import RSS_FEEDS for /sources endpoint
+try:
+    from feeds import RSS_FEEDS
+except ImportError:
+    from backend.feeds import RSS_FEEDS
+
 app = Flask(__name__)
 CORS(app) # Allow cross-origin requests from mobile
 
@@ -85,7 +91,19 @@ DASHBOARD_HTML = """
                     </table>
                 </div>
             </div>
-        </div>
+
+
+            
+            <!-- RSS Feeds -->
+            <div class="card">
+                <h2>📡 Active Feeds</h2>
+                <div class="stat" id="rss-count">0</div>
+                <div style="margin-top: 10px; max-height: 150px; overflow-y: auto;">
+                    <table id="rss-table">
+                        <!-- Feeds populate here -->
+                    </table>
+                </div>
+            </div>
 
         <!-- Signals History -->
         <div class="card">
@@ -95,6 +113,7 @@ DASHBOARD_HTML = """
                     <thead>
                         <tr>
                             <th>Time</th>
+                            <th>Source</th>
                             <th>Signal</th>
                             <th>Impact</th>
                             <th>Reason</th>
@@ -105,6 +124,7 @@ DASHBOARD_HTML = """
                     </tbody>
                 </table>
             </div>
+        </div>
         </div>
     </div>
 
@@ -135,9 +155,10 @@ DASHBOARD_HTML = """
                 document.getElementById('current-message').textContent = status.message || 'No status message';
 
                 // Update Tokens
-                document.getElementById('token-count').textContent = data.tokens.length;
+                const tokenKeys = Object.keys(data.tokens || {});
+                document.getElementById('token-count').textContent = tokenKeys.length;
                 const tokenTable = document.getElementById('token-table');
-                tokenTable.innerHTML = data.tokens.map(t => `
+                tokenTable.innerHTML = tokenKeys.map(t => `
                     <tr>
                         <td style="font-family: monospace; font-size: 0.8rem;">
                             ${t.substring(0, 20)}...
@@ -156,12 +177,37 @@ DASHBOARD_HTML = """
                     return `
                         <tr>
                             <td style="font-size: 0.85rem; color: #666;">${date}</td>
+                            <td style="font-size: 0.9rem; font-weight: 500; color: #555;">${s.data && s.data.source_name ? s.data.source_name : '-'}</td>
                             <td style="font-weight: bold;">${s.title}</td>
                             <td><span class="tag ${isBuy ? 'tag-buy' : 'tag-sell'}">${impact}</span></td>
                             <td style="font-size: 0.9rem;">${reason.substring(0, 80)}${reason.length > 80 ? '...' : ''}</td>
                         </tr>
                     `;
                 }).join('');
+
+                // Update RSS Sources
+                const rssFeeds = status.rss_feeds || [];
+                document.getElementById('rss-count').textContent = status.rss_source_count || 0;
+                
+                const rssTable = document.getElementById('rss-table');
+                if (rssFeeds.length > 0) {
+                     rssTable.innerHTML = rssFeeds.map(f => {
+                        const typeColor = f.type === 'FATOS' ? '#e3f2fd' : (f.type === 'INTERPRETACAO' ? '#fff3e0' : '#fce4ec');
+                        const textColor = f.type === 'FATOS' ? '#1565c0' : (f.type === 'INTERPRETACAO' ? '#e65100' : '#c2185b');
+                        
+                        return `
+                        <tr>
+                            <td style="font-size: 0.85rem; color: #555;">${f.url}</td>
+                            <td style="width: 100px; text-align: right;">
+                                <span style="background: ${typeColor}; color: ${textColor}; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; font-weight: bold;">
+                                    ${f.type}
+                                </span>
+                            </td>
+                        </tr>
+                    `}).join('');
+                } else {
+                     rssTable.innerHTML = '<tr><td>No feeds found</td></tr>';
+                }
 
             } catch (e) {
                 console.error("Failed to fetch data", e);
@@ -203,6 +249,7 @@ def load_tokens():
             for t, prefs in data.items():
                 if "whitelist" not in prefs: prefs["whitelist"] = []
                 if "blacklist" not in prefs: prefs["blacklist"] = []
+                if "source_whitelist" not in prefs: prefs["source_whitelist"] = []
             return data
     except:
         return {}
@@ -226,7 +273,7 @@ def register():
     tokens = load_tokens()
     
     if token not in tokens:
-        tokens[token] = {"min_buy": 0, "min_sell": 0, "whitelist": [], "blacklist": []}
+        tokens[token] = {"min_buy": 0, "min_sell": 0, "whitelist": [], "blacklist": [], "source_whitelist": []}
         save_tokens(tokens)
         logger.info(f"New token registered: {token}")
         return jsonify({"message": "Token registered successfully", "total_tokens": len(tokens)}), 201
@@ -256,10 +303,18 @@ def preferences():
         if 'min_sell' in data: settings['min_sell'] = int(data['min_sell'])
         if 'whitelist' in data: settings['whitelist'] = data['whitelist'] # Expecting list of strings
         if 'blacklist' in data: settings['blacklist'] = data['blacklist'] # Expecting list of strings
+        if 'source_whitelist' in data: settings['source_whitelist'] = data['source_whitelist'] # Expecting list of strings
         
         tokens[token] = settings
         save_tokens(tokens)
         return jsonify({"message": "Preferences saved", "settings": settings}), 200
+
+@app.route('/sources', methods=['GET'])
+def get_sources():
+    # Return unique source names
+    sources = list(set([f.get('name', 'Unknown') for f in RSS_FEEDS]))
+    sources.sort()
+    return jsonify(sources), 200
 
 @app.route('/signals', methods=['GET'])
 def get_signals():

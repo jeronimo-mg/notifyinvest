@@ -11,6 +11,8 @@ Notifications.setNotificationHandler({
     shouldShowAlert: true,
     shouldPlaySound: true,
     shouldSetBadge: false,
+    shouldShowBanner: true,
+    shouldShowList: true,
   }),
 });
 
@@ -19,6 +21,11 @@ interface Signal {
   body: string | null;
   date: string;
   url?: string;
+  data?: {
+    url?: string;
+    source_type?: string;
+    source_name?: string;
+  };
 }
 
 export default function HomeScreen() {
@@ -49,7 +56,8 @@ export default function HomeScreen() {
             body: item.body,
             // Timestamp is numeric seconds in history.json
             date: new Date(item.timestamp * 1000).toLocaleTimeString(),
-            url: item.data?.url
+            url: item.data?.url,
+            data: item.data
           }));
 
           // History comes oldest-first (append), we want newest-first in UI
@@ -177,14 +185,33 @@ export default function HomeScreen() {
           }
         >
           {filteredSignals.length === 0 && <Text style={styles.empty}>Nenhum sinal encontrado.</Text>}
-          {filteredSignals.map((sig, index) => (
-            <TouchableOpacity key={index} style={[styles.card, sig.title?.includes('SELL') ? { borderLeftColor: '#F44336' } : { borderLeftColor: '#4CAF50' }]} onPress={() => sig.url && Linking.openURL(sig.url)}>
-              <Text style={styles.cardTitle}>{sig.title}</Text>
-              <Text style={styles.cardBody}>{sig.body}</Text>
-              {sig.url && <Text style={styles.linkText}>📄 Ler Notícia Completa</Text>}
-              <Text style={styles.cardDate}>{sig.date}</Text>
-            </TouchableOpacity>
-          ))}
+          {filteredSignals.map((sig, index) => {
+            const sourceType = sig.data?.source_type || 'FATO';
+            let badgeColor = '#E3F2FD';
+            let badgeTextColor = '#1565C0';
+            if (sourceType === 'INTERPRETACAO') { badgeColor = '#FFF3E0'; badgeTextColor = '#E65100'; }
+            else if (sourceType === 'PERCEPCAO') { badgeColor = '#FCE4EC'; badgeTextColor = '#C2185B'; }
+
+            return (
+              <TouchableOpacity key={index} style={[styles.card, sig.title?.includes('SELL') ? { borderLeftColor: '#F44336' } : { borderLeftColor: '#4CAF50' }]} onPress={() => sig.url && Linking.openURL(sig.url)}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>
+                  <Text style={styles.cardTitle}>{sig.title}</Text>
+                  <View style={{ backgroundColor: badgeColor, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 }}>
+                    <Text style={{ color: badgeTextColor, fontSize: 10, fontWeight: 'bold' }}>{sourceType}</Text>
+                  </View>
+                </View>
+                <Text style={styles.cardBody}>{sig.body}</Text>
+                {sig.url && (
+                  <View style={{ backgroundColor: '#eee', padding: 8, borderRadius: 6, marginTop: 10, alignSelf: 'flex-start' }}>
+                    <Text style={{ fontWeight: '500', color: '#333' }}>
+                      🔗 Fonte: {sig.data && sig.data.source_name ? sig.data.source_name : 'Abrir Link'}
+                    </Text>
+                  </View>
+                )}
+                <Text style={styles.cardDate}>{sig.date}</Text>
+              </TouchableOpacity>
+            );
+          })}
         </ScrollView>
       </View>
     </SafeAreaView>

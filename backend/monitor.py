@@ -4,6 +4,7 @@ import json
 import sys
 import os
 import uuid
+import tempfile
 
 # Add libs to path imports work
 # Add libs to path imports work
@@ -44,28 +45,47 @@ SEEN_FILE = os.path.join(BASE_DIR, "seen_news.json")
 STATUS_FILE = os.path.join(BASE_DIR, "status.json")
 EXPO_TOKEN = None # Will be set dynamically or loaded from config
 
+def atomic_write_json(filepath, data):
+    """Safely write JSON to a file using a temp file and atomic rename."""
+    dir_name = os.path.dirname(filepath)
+    prefix = os.path.basename(filepath)
+    
+    # Create temp file in same directory to ensure atomic move works
+    fd, temp_path = tempfile.mkstemp(prefix=f".{prefix}.tmp", dir=dir_name, text=True)
+    try:
+        with os.fdopen(fd, 'w') as f:
+            json.dump(data, f)
+        # Atomic replacement
+        os.replace(temp_path, filepath)
+    except Exception as e:
+        print(f"Failed to write {filepath}: {e}")
+        # Clean up temp file if something went wrong
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except:
+                pass
+
 def load_seen():
     if os.path.exists(SEEN_FILE):
         with open(SEEN_FILE, 'r') as f:
             return set(json.load(f))
     return set()
 
+
 def save_seen(seen_set):
-    with open(SEEN_FILE, 'w') as f:
-        json.dump(list(seen_set), f)
+    atomic_write_json(SEEN_FILE, list(seen_set))
 
 def update_status(message):
     status = {
         "status": "running",
         "last_update": time.time(),
         "message": message,
+        "rss_source_count": len(RSS_FEEDS),
+        "rss_feeds": RSS_FEEDS,
         "pid": os.getpid()
     }
-    try:
-        with open(STATUS_FILE, 'w') as f:
-            json.dump(status, f)
-    except Exception as e:
-        print(f"Failed to update status: {e}")
+    atomic_write_json(STATUS_FILE, status)
 
 SIGNALS_FILE = os.path.join(os.path.dirname(__file__), "signals.json")
 MAX_SIGNALS = 1000 # Keep last 1000 signals (approx 3-6 months)
@@ -93,8 +113,20 @@ def save_signal(title, body, data):
     # Keep only last MAX_SIGNALS
     signals = signals[-MAX_SIGNALS:]
     
-    with open(SIGNALS_FILE, 'w') as f:
-        json.dump(signals, f)
+    atomic_write_json(SIGNALS_FILE, signals)
+
+
+# Global for heartbeat
+CURRENT_MESSAGE = "Initializing..."
+
+def heartbeat_loop():
+    """Keeps the status file fresh so Dashboard sees us as Online."""
+    while True:
+        try:
+            update_status(CURRENT_MESSAGE)
+        except:
+            pass
+        time.sleep(15) # Update every 15s
 
 def main():
     print("Starting B3 News Monitor...")
@@ -102,9 +134,16 @@ def main():
     
     seen_links = load_seen()
     
+    # Start Heartbeat
+    import threading
+    t = threading.Thread(target=heartbeat_loop, daemon=True)
+    t.start()
+    
     # Prepare for multi-user support
     import json
     token_file = os.path.join(os.path.dirname(__file__), 'tokens.json')
+
+    global CURRENT_MESSAGE
 
     while True:
                 # Load tokens dynamically (supports dict or list for migration)
@@ -136,8 +175,13 @@ def main():
         found_any_new = False
 
         print(f"Checking {len(RSS_FEEDS)} feeds for {len(tokens)} users...")
-        update_status(f"Checking {len(RSS_FEEDS)} feeds...")
-        for feed_url in RSS_FEEDS:
+        CURRENT_MESSAGE = f"Checking {len(RSS_FEEDS)} feeds..."
+        update_status(CURRENT_MESSAGE)
+        
+        for feed_item in RSS_FEEDS:
+            feed_url = feed_item['url']
+            source_type = feed_item['type']
+            source_name = feed_item.get('name', 'Unknown')
             try:
                 feed = feedparser.parse(feed_url)
                 for entry in feed.entries:
@@ -164,9 +208,11 @@ def main():
                         
                         # Analyze (Gemma-27b)
                         try:
+                            CURRENT_MESSAGE = f"Waiting for Gemini API ({tickers[0]})..."
+                            update_status(CURRENT_MESSAGE) # Force immediate update
+                            
                             analysis = analyze_news(tickers[0], title, summary)
                             print(f"Analysis: {analysis}")
-                            update_status(f"Analyzing {tickers[0]}...")
                             
                             
                             if analysis.get('signal') in ['BUY', 'SELL']:
@@ -187,7 +233,11 @@ def main():
                                 
                                 print(f"Sending V3 Notification: {push_title} (Impact: {impact_val}%)")
                                 
-                                push_data = {"url": link}
+                                push_data = {
+                                    "url": link,
+                                    "source_type": source_type,
+                                    "source_name": source_name
+                                }
 
                                 # Save to signals DB (Always save, regardless of user prefs)
                                 save_signal(push_title, msg, push_data)
@@ -198,6 +248,7 @@ def main():
                                     min_sell = prefs.get('min_sell', 0)
                                     whitelist = prefs.get('whitelist', [])
                                     blacklist = prefs.get('blacklist', [])
+                                    source_whitelist = prefs.get('source_whitelist', [])
                                     
                                     # Filter by Company (Ticker)
                                     # push_title is like "PETR4: BUY"
@@ -214,7 +265,13 @@ def main():
                                             print(f"Skipping {ticker} for {user_token} (Not in Whitelist)")
                                             continue
 
-                                    # 3. Impact Threshold Check
+                                    # 3. Source Whitelist Check (If active, must be in it)
+                                    if source_whitelist and len(source_whitelist) > 0:
+                                        if source_name not in source_whitelist:
+                                            # print(f"Skipping {ticker} for {user_token} (Source {source_name} not in whitelist)")
+                                            continue
+
+                                    # 4. Impact Threshold Check
                                     if analysis['signal'] == 'BUY':
                                         if impact_val >= min_buy: should_send = True
                                     elif analysis['signal'] == 'SELL':
@@ -236,10 +293,12 @@ def main():
         
         if found_any_new:
             print("New items processed! Checking again immediately (Burst Mode)...")
+            CURRENT_MESSAGE = "Burst Mode: Checking again..."
             time.sleep(10) # Small buffer to be polite to the RSS server (avoid instant ban)
         else:
             print(f"No new items. Sleeping for {POLL_INTERVAL}s...")
-            update_status(f"Sleeping ({POLL_INTERVAL}s)...")
+            CURRENT_MESSAGE = f"Sleeping ({POLL_INTERVAL}s)..."
+            update_status(CURRENT_MESSAGE)
             time.sleep(POLL_INTERVAL)
 
 if __name__ == "__main__":
