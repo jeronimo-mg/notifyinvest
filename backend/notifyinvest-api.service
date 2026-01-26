@@ -4,8 +4,8 @@ After=network.target
 
 [Service]
 User=opc
-WorkingDirectory=/opt/notifyinvest
-ExecStart=/opt/notifyinvest/venv/bin/python backend/api.py
+WorkingDirectory=/home/opc/notifyinvest
+ExecStart=/home/opc/notifyinvest/venv/bin/python backend/api.py
 Restart=always
 RestartSec=10
 Environment=PYTHONUNBUFFERED=1

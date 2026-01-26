@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
-import { Text, View, Button, Platform, StyleSheet, ScrollView } from 'react-native';
-import * as Device from 'expo-device';
+import { Text, View, Platform, StyleSheet, ScrollView, Linking, TouchableOpacity, TextInput, RefreshControl } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Notifications from 'expo-notifications';
 import Constants from 'expo-constants';
+
+const SERVER_IP = '144.22.206.150'; // OCI VM IP
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -12,53 +14,180 @@ Notifications.setNotificationHandler({
   }),
 });
 
+interface Signal {
+  title: string | null;
+  body: string | null;
+  date: string;
+  url?: string;
+}
+
 export default function HomeScreen() {
-  const [expoPushToken, setExpoPushToken] = useState('');
-  const [notification, setNotification] = useState(false);
-  const notificationListener = useRef();
-  const responseListener = useRef();
-  const [signals, setSignals] = useState([]);
+  const [expoPushToken, setExpoPushToken] = useState<string | undefined>('');
+  const [notification, setNotification] = useState<Notifications.Notification | false>(false);
+  const notificationListener = useRef<Notifications.Subscription>(undefined);
+  const responseListener = useRef<Notifications.Subscription>(undefined);
+  const [signals, setSignals] = useState<Signal[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [refreshing, setRefreshing] = useState(false);
+
+  // Filters
+  const [filterType, setFilterType] = useState<'ALL' | 'BUY' | 'SELL'>('ALL');
+  const [minImpact, setMinImpact] = useState('');
+
+  const syncSignals = async (query = '') => {
+    try {
+      console.log(`Syncing signals (query="${query}")...`);
+      const url = `http://${SERVER_IP}:5000/signals?limit=50&search=${encodeURIComponent(query)}`;
+      const response = await fetch(url);
+      const data = await response.json();
+      console.log('History received:', data?.length);
+
+      if (Array.isArray(data)) {
+        setSignals(prev => {
+          const newSignals: Signal[] = data.map((item: any) => ({
+            title: item.title,
+            body: item.body,
+            // Timestamp is numeric seconds in history.json
+            date: new Date(item.timestamp * 1000).toLocaleTimeString(),
+            url: item.data?.url
+          }));
+
+          // History comes oldest-first (append), we want newest-first in UI
+          return newSignals.reverse();
+        });
+      }
+    } catch (e) {
+      console.error('Failed to sync signals:', e);
+    }
+  };
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    await syncSignals(searchQuery);
+    setRefreshing(false);
+  };
+
+  // derived state for filtering
+  const filteredSignals = signals.filter(sig => {
+    // 1. Type Filter
+    if (filterType !== 'ALL') {
+      if (!sig.title?.toUpperCase().includes(filterType)) return false;
+    }
+
+    // 2. Impact Filter
+    if (minImpact) {
+      const impactVal = parseInt(minImpact);
+      if (!isNaN(impactVal) && sig.body) {
+        // Regex to find "Estimativa: +5%" or "Estimativa: 5%"
+        // We look for digits followed by %
+        const match = sig.body.match(/(\d+)%/);
+        if (match) {
+          const currentImpact = parseInt(match[1]);
+          if (currentImpact < impactVal) return false;
+        }
+      }
+    }
+    return true;
+  });
 
   useEffect(() => {
+    // 1. Sync Inbox immediately
+    syncSignals();
+
+    // 2. Register for Pushes
     registerForPushNotificationsAsync().then(token => setExpoPushToken(token));
 
     notificationListener.current = Notifications.addNotificationReceivedListener(notification => {
       setNotification(notification);
-      // Add to list
+      // Add to list with URL
       const content = notification.request.content;
-      setSignals(prev => [{ title: content.title, body: content.body, date: new Date().toLocaleTimeString() }, ...prev]);
+      const url = content.data?.url as string | undefined;
+      setSignals(prev => [{
+        title: content.title,
+        body: content.body,
+        date: new Date().toLocaleTimeString(),
+        url: url
+      }, ...prev]);
     });
 
     responseListener.current = Notifications.addNotificationResponseReceivedListener(response => {
-      console.log(response);
+      console.log('Notification clicked, opening app.');
     });
 
     return () => {
-      Notifications.removeNotificationSubscription(notificationListener.current);
-      Notifications.removeNotificationSubscription(responseListener.current);
+      notificationListener.current && notificationListener.current.remove();
+      responseListener.current && responseListener.current.remove();
     };
   }, []);
 
+  useEffect(() => {
+    const delayDebounceFn = setTimeout(() => {
+      syncSignals(searchQuery);
+    }, 500);
+
+    return () => clearTimeout(delayDebounceFn);
+  }, [searchQuery]);
+
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container}>
       <Text style={styles.header}>NotifyInvest</Text>
 
-      {/* Token hidden for production aesthetics. Check console logs if needed. */}
+      <View style={styles.searchContainer}>
+        <TextInput
+          style={styles.searchInput}
+          placeholder="🔎 Pesquisar (ex: PETR4)..."
+          value={searchQuery}
+          onChangeText={text => setSearchQuery(text)}
+          onSubmitEditing={() => syncSignals(searchQuery)}
+          returnKeyType="search"
+        />
+      </View>
+
+      {/* Filter Controls */}
+      <View style={styles.filters}>
+        <View style={styles.typeButtons}>
+          <TouchableOpacity onPress={() => setFilterType('ALL')} style={[styles.filterBtn, filterType === 'ALL' && styles.filterBtnActive]}>
+            <Text style={[styles.filterBtnText, filterType === 'ALL' && styles.filterBtnTextActive]}>Todos</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => setFilterType('BUY')} style={[styles.filterBtn, filterType === 'BUY' && styles.filterBtnActive, { borderColor: '#4CAF50' }]}>
+            <Text style={[styles.filterBtnText, filterType === 'BUY' && styles.filterBtnTextActive, { color: filterType === 'BUY' ? '#fff' : '#4CAF50' }]}>Buy</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => setFilterType('SELL')} style={[styles.filterBtn, filterType === 'SELL' && styles.filterBtnActive, { borderColor: '#F44336' }]}>
+            <Text style={[styles.filterBtnText, filterType === 'SELL' && styles.filterBtnTextActive, { color: filterType === 'SELL' ? '#fff' : '#F44336' }]}>Sell</Text>
+          </TouchableOpacity>
+        </View>
+
+        <View style={styles.impactInputContainer}>
+          <Text style={{ fontSize: 12, color: '#666', marginRight: 5 }}>% Mín:</Text>
+          <TextInput
+            style={styles.impactInput}
+            placeholder="0"
+            keyboardType="numeric"
+            value={minImpact}
+            onChangeText={setMinImpact}
+          />
+        </View>
+      </View>
 
       <View style={styles.feed}>
-        <Text style={styles.feedHeader}>Recent Signals:</Text>
-        <ScrollView>
-          {signals.length === 0 && <Text style={styles.empty}>No signals yet. Waiting for news...</Text>}
-          {signals.map((sig, index) => (
-            <View key={index} style={styles.card}>
+
+        <ScrollView
+          refreshControl={
+            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+          }
+        >
+          {filteredSignals.length === 0 && <Text style={styles.empty}>Nenhum sinal encontrado.</Text>}
+          {filteredSignals.map((sig, index) => (
+            <TouchableOpacity key={index} style={[styles.card, sig.title?.includes('SELL') ? { borderLeftColor: '#F44336' } : { borderLeftColor: '#4CAF50' }]} onPress={() => sig.url && Linking.openURL(sig.url)}>
               <Text style={styles.cardTitle}>{sig.title}</Text>
               <Text style={styles.cardBody}>{sig.body}</Text>
+              {sig.url && <Text style={styles.linkText}>📄 Ler Notícia Completa</Text>}
               <Text style={styles.cardDate}>{sig.date}</Text>
-            </View>
+            </TouchableOpacity>
           ))}
         </ScrollView>
       </View>
-    </View>
+    </SafeAreaView>
   );
 }
 
@@ -73,9 +202,6 @@ async function registerForPushNotificationsAsync() {
       lightColor: '#FF231F7C',
     });
   }
-
-  // Bypass Device.isDevice check to allow Emulators/Web for testing
-  // if (Device.isDevice) { ... }
 
   if (true) {
     const { status: existingStatus } = await Notifications.getPermissionsAsync();
@@ -96,31 +222,18 @@ async function registerForPushNotificationsAsync() {
       token = (await Notifications.getExpoPushTokenAsync({ projectId })).data;
       console.log("Token:", token);
     } catch (e) {
-      // Handle Web/VAPID error gracefully
-      const errorString = `${e}`;
-      if (errorString.includes('vapidPublicKey')) {
-        console.warn("Web Push requires VAPID keys. Using Mock Token.");
-        token = "WEB_MOCK_TOKEN_" + Math.random().toString(36).substring(7);
-      }
-      // Handle missing Project ID (Emulator/Bare)
-      else if (errorString.includes('projectId')) {
-        console.warn("No Project ID found. Using Emulator Mock Token.");
-        token = "EMULATOR_MOCK_TOKEN_" + Math.random().toString(36).substring(7);
-      }
-      else {
-        token = `Error: ${e}`;
-        console.error(e);
-      }
+      token = `${e}`;
+      console.error(e);
     }
   } else {
     alert('Must use physical device for Push Notifications');
   }
 
-  // --- V2: Register Token with Cloud API ---
+  // --- Register Token with Cloud API ---
   if (token && !token.startsWith('Error')) {
     try {
       console.log("Registering token with Cloud API...");
-      const SERVER_URL = 'http://144.22.206.150:5000/register'; // YOUR_VM_IP
+      const SERVER_URL = `http://${SERVER_IP}:5000/register`;
       await fetch(SERVER_URL, {
         method: 'POST',
         headers: {
@@ -131,7 +244,6 @@ async function registerForPushNotificationsAsync() {
       console.log("Token registered successfully on Cloud!");
     } catch (apiError) {
       console.error("Failed to register token on Cloud:", apiError);
-      // Optional: Retry logic could go here
     }
   }
 
@@ -142,20 +254,29 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#f5f5f5',
-    paddingTop: 50,
     paddingHorizontal: 20,
   },
   header: {
     fontSize: 28,
     fontWeight: 'bold',
-    marginBottom: 20,
+    marginBottom: 10, // reduced margin
+    marginTop: 10,
     color: '#333',
     textAlign: 'center',
   },
-
+  searchContainer: {
+    paddingBottom: 10,
+  },
+  searchInput: {
+    backgroundColor: '#fff',
+    padding: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#ddd',
+    fontSize: 16,
+  },
   feed: {
     flex: 1,
-    style: { flex: 1 } /* Fixed flex style for feed container */
   },
   feedHeader: {
     fontSize: 20,
@@ -174,7 +295,7 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     marginBottom: 10,
     borderLeftWidth: 5,
-    borderLeftColor: '#4CAF50', // Green for signal
+    borderLeftColor: '#4CAF50',
     elevation: 2,
   },
   cardTitle: {
@@ -191,5 +312,53 @@ const styles = StyleSheet.create({
     color: '#aaa',
     marginTop: 5,
     textAlign: 'right',
+  },
+  linkText: {
+    fontWeight: 'bold',
+    fontSize: 14,
+  },
+  filters: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  typeButtons: {
+    flexDirection: 'row',
+    gap: 5,
+  },
+  filterBtn: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#888',
+    backgroundColor: 'transparent',
+  },
+  filterBtnActive: {
+    backgroundColor: '#333',
+    borderColor: '#333',
+  },
+  filterBtnText: {
+    fontSize: 12,
+    color: '#333',
+    fontWeight: '600',
+  },
+  filterBtnTextActive: {
+    color: '#fff',
+  },
+  impactInputContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  impactInput: {
+    backgroundColor: '#fff',
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: '#ddd',
+    width: 50,
+    textAlign: 'center',
   }
 });

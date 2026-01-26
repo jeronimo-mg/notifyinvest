@@ -1,44 +1,75 @@
 import json
-import requests
+import time
+import os
+import uuid
+import sys
 
-TOKEN_FILE = '/opt/notifyinvest/backend/tokens.json'
-
-def send_push_notification(token, title, body):
-    url = "https://exp.host/--/api/v2/push/send"
-    headers = {
-        "Host": "exp.host",
-        "Accept": "application/json",
-        "Accept-Encoding": "gzip, deflate",
-        "Content-Type": "application/json"
-    }
-    data = {
-        "to": token,
-        "title": title,
-        "body": body,
-        "sound": "default"
-    }
-    
-    try:
-        response = requests.post(url, headers=headers, json=data)
-        print(f"Sent to {token}: {response.status_code} - {response.text}")
-    except Exception as e:
-        print(f"Error sending to {token}: {e}")
+# Ensure we can import backend paths
+sys.path.append(os.path.dirname(__file__))
+sys.path.append(os.path.join(os.path.dirname(__file__), 'libs'))
 
 try:
-    with open(TOKEN_FILE, 'r') as f:
-        tokens = json.load(f)
+    from push import send_push_notification
+except ImportError:
+    # If running from root
+    sys.path.append('backend')
+    from backend.push import send_push_notification
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__)) # Should be /home/opc/notifyinvest/backend
+TOKENS_FILE = os.path.join(BASE_DIR, 'tokens.json')
+SIGNALS_FILE = os.path.join(BASE_DIR, 'signals.json')
+
+def load_tokens():
+    if os.path.exists(TOKENS_FILE):
+        with open(TOKENS_FILE, 'r') as f:
+            return json.load(f)
+    print("No tokens found.")
+    return []
+
+def save_signal(title, body, data):
+    signals = []
+    if os.path.exists(SIGNALS_FILE):
+        try:
+            with open(SIGNALS_FILE, 'r') as f:
+                signals = json.load(f)
+        except:
+            signals = []
     
-    print(f"Found {len(tokens)} tokens in {TOKEN_FILE}:")
-    print(tokens)
+    new_signal = {
+        "id": str(uuid.uuid4()),
+        "title": title,
+        "body": body,
+        "data": data,
+        "timestamp": time.time()
+    }
+    
+    signals.append(new_signal)
+    signals = signals[-1000:] # Keep last 1000
+    
+    with open(SIGNALS_FILE, 'w') as f:
+        json.dump(signals, f)
+    print("Signal saved to DB.")
 
-    if not tokens:
-        print("No tokens found! App registration failed.")
-    else:
-        print("Sending test messages...")
-        for token in tokens:
-            send_push_notification(token, "Test Verification", "If you see this, the Release APK is working! \uD83D\uDE80")
+def main():
+    print("--- MANUAL SIGNAL TRIGGER ---")
+    tokens = load_tokens()
+    print(f"Found {len(tokens)} registered devices.")
 
-except FileNotFoundError:
-    print(f"File not found: {TOKEN_FILE}")
-except Exception as e:
-    print(f"Error: {e}")
+    title = "TESTE: TRIGGER MANUAL"
+    body = "Estimativa: +0%\nIsso é um teste de verificação de sistema."
+    data = {"url": "https://google.com"}
+
+    # 1. Save to DB (Dash update)
+    save_signal(title, body, data)
+
+    # 2. Send Push
+    for token in tokens:
+        print(f"Sending to {token}...")
+        try:
+            send_push_notification(token, title, body, data)
+            print("Success!")
+        except Exception as e:
+            print(f"Failed: {e}")
+
+if __name__ == "__main__":
+    main()
