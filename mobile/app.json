@@ -40,6 +40,18 @@
             "backgroundColor": "#000000"
           }
         }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "packagingOptions": {
+              "pickFirst": [
+                "lib/**/libworklets.so"
+              ]
+            }
+          }
+        }
       ]
     ],
     "experiments": {
