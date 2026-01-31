@@ -60,7 +60,10 @@ DASHBOARD_HTML = """
     <div class="container">
         <h1>
             <span>NotifyInvest Server</span>
-            <button class="refresh-btn" onclick="fetchData()">Refresh</button>
+            <div>
+                <a href="/tickers" class="refresh-btn" style="text-decoration: none; background: #607D8B; margin-right: 10px;">View Tickers</a>
+                <button class="refresh-btn" onclick="fetchData()">Refresh</button>
+            </div>
         </h1>
         
         <div class="grid">
@@ -398,6 +401,86 @@ def get_signals():
 @app.route('/dashboard', methods=['GET'])
 def dashboard():
     return DASHBOARD_HTML
+
+@app.route('/tickers', methods=['GET'])
+def view_tickers():
+    try:
+        from b3_tickers import B3_TICKERS
+    except ImportError:
+        B3_TICKERS = {}
+        
+    sorted_tickers = sorted(B3_TICKERS.items())
+    
+    html = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>NotifyInvest - B3 Tickers</title>
+        <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f0f2f5; margin: 0; padding: 20px; color: #333; }
+            .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+            h1 { margin-bottom: 20px; text-align: center; color: #1a1a1a; }
+            .search-box { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 8px; margin-bottom: 20px; font-size: 1rem; box-sizing: border-box; }
+            table { width: 100%; border-collapse: collapse; }
+            th, td { text-align: left; padding: 12px; border-bottom: 1px solid #eee; }
+            th { background: #f8f9fa; position: sticky; top: 0; }
+            tr:hover { background: #f5f5f5; }
+            .count { text-align: center; color: #666; margin-bottom: 20px; }
+            .back-btn { display: inline-block; margin-bottom: 20px; color: #2196F3; text-decoration: none; font-weight: 500; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <a href="/dashboard" class="back-btn">← Back to Dashboard</a>
+            <h1>B3 Ticker Database</h1>
+            <div class="count">Tracking <strong>%d</strong> companies</div>
+            
+            <input type="text" id="search" class="search-box" placeholder="Search ticker or name..." onkeyup="filterTable()">
+            
+            <table id="tickerTable">
+                <thead>
+                    <tr>
+                        <th>Company / Key</th>
+                        <th>Ticker</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    %s
+                </tbody>
+            </table>
+        </div>
+
+        <script>
+            function filterTable() {
+                const input = document.getElementById('search');
+                const filter = input.value.toUpperCase();
+                const table = document.getElementById('tickerTable');
+                const tr = table.getElementsByTagName('tr');
+
+                for (let i = 1; i < tr.length; i++) {
+                    const tds = tr[i].getElementsByTagName('td');
+                    let show = false;
+                    for (let j = 0; j < tds.length; j++) {
+                        if (tds[j].textContent.toUpperCase().indexOf(filter) > -1) {
+                            show = true;
+                            break;
+                        }
+                    }
+                    tr[i].style.display = show ? '' : 'none';
+                }
+            }
+        </script>
+    </body>
+    </html>
+    """
+    
+    rows = ""
+    for key, value in sorted_tickers:
+        rows += f"<tr><td>{key}</td><td><strong>{value}</strong></td></tr>"
+        
+    return html % (len(B3_TICKERS), rows)
 
 @app.route('/api/data', methods=['GET'])
 def get_dashboard_data():
