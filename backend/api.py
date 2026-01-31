@@ -281,6 +281,60 @@ def register():
         logger.info(f"Token already exists: {token}")
         return jsonify({"message": "Token already registered", "total_tokens": len(tokens)}), 200
 
+@app.route('/debug/test', methods=['POST'])
+def debug_test():
+    """Manual trigger for testing notification delivery and DB storage."""
+    try:
+        from push import send_push_notification
+        import uuid
+        import time
+        
+        # 1. Load Tokens
+        tokens = load_tokens()
+        results = {}
+        
+        # 2. Create Signal Data
+        title = "DEBUG: SERVER TEST"
+        body = "Teste manual disparado do endpoint /debug/test."
+        data = {"url": "https://google.com", "source_name": "Debug System"}
+        
+        # 3. Save to DB (Status/Signals)
+        if os.path.exists(SIGNALS_FILE):
+            with open(SIGNALS_FILE, 'r') as f:
+                signals = json.load(f)
+        else:
+            signals = []
+            
+        new_signal = {
+            "id": str(uuid.uuid4()),
+            "title": title,
+            "body": body,
+            "data": data,
+            "timestamp": time.time()
+        }
+        signals.append(new_signal)
+        # Keep last 1000
+        with open(SIGNALS_FILE, 'w') as f:
+            json.dump(signals[-1000:], f)
+            
+        # 4. Broadcast
+        for token in tokens.keys():
+            try:
+                send_push_notification(token, title, body, data)
+                results[token] = "Success"
+            except Exception as e:
+                results[token] = str(e)
+                
+        return jsonify({
+            "status": "completed",
+            "db_updated": True,
+            "signal_id": new_signal['id'],
+            "delivery_results": results
+        }), 200
+    except Exception as e:
+        logger.error(f"Debug test failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/preferences', methods=['GET', 'POST'])
 def preferences():
     tokens = load_tokens()
