@@ -31,6 +31,10 @@ def find_matches(title, summary=""):
         print(f"Error loading Gemma-3-12b-it: {e}")
         raise e
 
+    
+    # Validation Helper
+    from b3_tickers import B3_TICKERS
+    
     text = f"{title}\n{summary}"
     
     prompt = f"""
@@ -38,20 +42,34 @@ def find_matches(title, summary=""):
     
     News: "{text}"
     
-    Return ONLY a JSON array of the official B3 tickers of the companies found. 
-    If the company is mentioned by name (e.g., "Vale"), return the ticker (e.g., "VALE3").
-    If no B3 company is mentioned, return [].
+    Task:
+    1. Identify company names or tickers.
+    2. Convert company names to their PRIMARY liquid ticker (e.g. Petrobras -> PETR4, Vale -> VALE3).
+    3. Return ONLY a JSON array of these tickers.
     
-    Example Output: ["PETR4", "MGLU3"]
+    Rules:
+    - If the ticker provided in the text is valid (e.g. JBSS3), use it.
+    - If only the name is provided, map it to the most traded ticker.
+    - Ignore ETFs or Indexes (IBOV, SPX) unless explicitly asked.
+    - If no B3 company is found, return [].
+    
+    Example Output: ["PETR4", "WEGE3"]
     """
     
     try:
         response = model.generate_content(prompt)
         content = response.text.replace("```json", "").replace("```", "").strip()
         tickers = json.loads(content)
+        
+        valid_tickers = []
         if isinstance(tickers, list):
-            return tickers
-        return []
+            for t in tickers:
+                t = t.upper().strip()
+                # Basic Validation: Length 5-6 (XXXX3, XXXX11)
+                if len(t) >= 4 and any(char.isdigit() for char in t):
+                    valid_tickers.append(t)
+                
+        return valid_tickers
     except Exception as e:
         print(f"Matcher AI Error: {e}")
         return []
