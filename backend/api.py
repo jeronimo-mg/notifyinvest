@@ -404,12 +404,23 @@ def dashboard():
 
 @app.route('/tickers', methods=['GET'])
 def view_tickers():
+    import traceback
+    
+    B3_TICKERS = {}
+    error_details = ""
+    
     try:
-        from b3_tickers import B3_TICKERS
-    except ImportError:
+        try:
+            from b3_tickers import B3_TICKERS
+        except ImportError:
+            # Fallback for when running from root dir
+            from backend.b3_tickers import B3_TICKERS
+            
+    except Exception as e:
+        error_details = f"Import Error: {str(e)}<br><pre>{traceback.format_exc()}</pre>"
         B3_TICKERS = {}
         
-    sorted_tickers = sorted(B3_TICKERS.items())
+    sorted_tickers = sorted(B3_TICKERS.items()) if B3_TICKERS else []
     
     html = """
     <!DOCTYPE html>
@@ -422,6 +433,7 @@ def view_tickers():
             body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f0f2f5; margin: 0; padding: 20px; color: #333; }
             .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
             h1 { margin-bottom: 20px; text-align: center; color: #1a1a1a; }
+            .error-box { background: #ffebee; color: #c62828; padding: 15px; border-radius: 8px; margin-bottom: 20px; overflow-x: auto; }
             .search-box { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 8px; margin-bottom: 20px; font-size: 1rem; box-sizing: border-box; }
             table { width: 100%; border-collapse: collapse; }
             th, td { text-align: left; padding: 12px; border-bottom: 1px solid #eee; }
@@ -435,6 +447,9 @@ def view_tickers():
         <div class="container">
             <a href="/dashboard" class="back-btn">← Back to Dashboard</a>
             <h1>B3 Ticker Database</h1>
+            
+            %s
+            
             <div class="count">Tracking <strong>%d</strong> companies</div>
             
             <input type="text" id="search" class="search-box" placeholder="Search ticker or name..." onkeyup="filterTable()">
@@ -479,8 +494,11 @@ def view_tickers():
     rows = ""
     for key, value in sorted_tickers:
         rows += f"<tr><td>{key}</td><td><strong>{value}</strong></td></tr>"
+    
+    error_html = f'<div class="error-box"><strong>System Error:</strong><br>{error_details}</div>' if error_details else ""
         
-    return html % (len(B3_TICKERS), rows)
+    # Use replace to avoid conflict with CSS % 
+    return html.replace("%s", error_html, 1).replace("%d", str(len(B3_TICKERS))).replace("%s", rows)
 
 @app.route('/api/data', methods=['GET'])
 def get_dashboard_data():
