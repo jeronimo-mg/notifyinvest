@@ -1,31 +1,36 @@
-import google.generativeai as genai
-import os
-
+from google import genai
+from google.genai import types
+import json
 import os
 
 try:
     from secrets import GEMINI_API_KEY as API_KEY
-except ImportError:
-    from backend.secrets import GEMINI_API_KEY as API_KEY
-except:
-    API_KEY = os.getenv("GEMINI_API_KEY")
+except Exception:
+    try:
+        from backend.secrets import GEMINI_API_KEY as API_KEY
+    except Exception:
+        API_KEY = os.getenv("GEMINI_API_KEY")
 
 if not API_KEY:
     print("WARNING: Gemini API Key not found. Please set GEMINI_API_KEY env var or create backend/secrets.py")
 
+_client = None
 
 def configure_genai():
-    genai.configure(api_key=API_KEY)
+    global _client
+    if _client is None:
+        _client = genai.Client(api_key=API_KEY)
+    return _client
 
 def analyze_news(ticker, title, summary):
     """
-    Analyzes news using Gemma-3-27b-it.
+    Analyzes news using Gemma-4-31b-it.
     Returns analysis JSON.
     """
     try:
-        model = genai.GenerativeModel('gemma-3-27b-it')
+        client = configure_genai()
     except Exception as e:
-        print(f"FATAL: Could not load 'gemma-3-27b-it'. {e}")
+        print(f"FATAL: Could not initialize GenAI client for 'gemma-4-31b-it'. {e}")
         raise e
     
     prompt = f"""
@@ -51,16 +56,22 @@ def analyze_news(ticker, title, summary):
     """
     
     try:
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model='gemma-4-31b-it',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json"
+            )
+        )
         text = response.text.replace("```json", "").replace("```", "").strip()
-        result = eval(text) 
+        result = json.loads(text)
         return result
     except Exception as e:
         print(f"Error analyzing with Gemma: {e}")
         return {"signal": "HOLD", "sentiment": "NEUTRAL", "reason": "Erro na análise AI"}
 
 if __name__ == "__main__":
-    print("Testing Brain (Gemma-3-27b)...")
+    print("Testing Brain (Gemma-4-31b-it)...")
     configure_genai()
     try:
         res = analyze_news("PETR4", "Petrobras descobre novo poço", "Descoberta relevante no pré-sal.")

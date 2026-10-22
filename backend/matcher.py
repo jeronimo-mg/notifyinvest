@@ -1,39 +1,44 @@
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import json
 import os
 
 
 try:
     from secrets import GEMINI_API_KEY as API_KEY
-except ImportError:
-    from backend.secrets import GEMINI_API_KEY as API_KEY
-except:
-    API_KEY = os.getenv("GEMINI_API_KEY")
+except Exception:
+    try:
+        from backend.secrets import GEMINI_API_KEY as API_KEY
+    except Exception:
+        API_KEY = os.getenv("GEMINI_API_KEY")
 
 if not API_KEY:
     print("WARNING: Gemini API Key not found. Please set GEMINI_API_KEY env var or create backend/secrets.py")
 
+_client = None
 
 def configure_matcher_ai():
-    genai.configure(api_key=API_KEY)
+    global _client
+    if _client is None:
+        _client = genai.Client(api_key=API_KEY)
+    return _client
 
 def find_matches(title, summary=""):
     """
-    Uses Gemma-3-12b-it to identify B3 companies in the text.
+    Uses Gemma-4-26b-a4b-it to identify B3 companies in the text.
     Returns: List of tickers (e.g. ['PETR4', 'VALE3'])
     """
-    configure_matcher_ai()
-    
     try:
-        # User requested Gemma-3-12b. 
-        model = genai.GenerativeModel('gemma-3-12b-it')
+        client = configure_matcher_ai()
     except Exception as e:
-        print(f"Error loading Gemma-3-12b-it: {e}")
+        print(f"Error initializing GenAI client for gemma-4-26b-a4b-it: {e}")
         raise e
 
-    
     # Validation Helper
-    from b3_tickers import B3_TICKERS
+    try:
+        from b3_tickers import B3_TICKERS
+    except ImportError:
+        from backend.b3_tickers import B3_TICKERS
     
     text = f"{title}\n{summary}"
     
@@ -57,14 +62,20 @@ def find_matches(title, summary=""):
     """
     
     try:
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model='gemma-4-26b-a4b-it',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json"
+            )
+        )
         content = response.text.replace("```json", "").replace("```", "").strip()
         tickers = json.loads(content)
         
         valid_tickers = []
         if isinstance(tickers, list):
             for t in tickers:
-                t = t.upper().strip()
+                t = str(t).upper().strip()
                 # Basic Validation: Length 5-6 (XXXX3, XXXX11)
                 if len(t) >= 4 and any(char.isdigit() for char in t):
                     valid_tickers.append(t)
@@ -75,7 +86,7 @@ def find_matches(title, summary=""):
         return []
 
 if __name__ == "__main__":
-    print("Testing Matcher (Gemma-3-12b)...")
+    print("Testing Matcher (Gemma-4-26b-a4b-it)...")
     try:
         tickers = find_matches("Vale anucia dividendos bilionários e ações sobem", "A mineradora Vale (VALE3) surpreendeu o mercado com anúncio.")
         print(f"Found tickers: {tickers}")
