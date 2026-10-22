@@ -75,10 +75,7 @@ def analyze_news(ticker, title, summary):
         try:
             response = client.models.generate_content(
                 model='gemma-4-26b-a4b-it',
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json"
-                )
+                contents=prompt
             )
             return _parse_json_object(response.text)
         except Exception as fallback_err:

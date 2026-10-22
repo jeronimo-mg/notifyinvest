@@ -1,7 +1,8 @@
 from google import genai
-from google.genai import types
 import json
 import os
+import re
+import time
 
 
 try:
@@ -22,6 +23,13 @@ def configure_matcher_ai():
     if _client is None:
         _client = genai.Client(api_key=API_KEY)
     return _client
+
+def _parse_json_array(raw_text):
+    content = raw_text.replace("```json", "").replace("```", "").strip()
+    match = re.search(r"\[.*\]", content, re.DOTALL)
+    if match:
+        content = match.group(0)
+    return json.loads(content)
 
 def find_matches(title, summary=""):
     """
@@ -61,29 +69,27 @@ def find_matches(title, summary=""):
     Example Output: ["PETR4", "WEGE3"]
     """
     
-    try:
-        response = client.models.generate_content(
-            model='gemma-4-26b-a4b-it',
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json"
+    for model_name in ('gemma-4-26b-a4b-it', 'gemma-4-31b-it'):
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt
             )
-        )
-        content = response.text.replace("```json", "").replace("```", "").strip()
-        tickers = json.loads(content)
-        
-        valid_tickers = []
-        if isinstance(tickers, list):
-            for t in tickers:
-                t = str(t).upper().strip()
-                # Basic Validation: Length 5-6 (XXXX3, XXXX11)
-                if len(t) >= 4 and any(char.isdigit() for char in t):
-                    valid_tickers.append(t)
-                
-        return valid_tickers
-    except Exception as e:
-        print(f"Matcher AI Error: {e}")
-        return []
+            tickers = _parse_json_array(response.text)
+            valid_tickers = []
+            if isinstance(tickers, list):
+                for t in tickers:
+                    t = str(t).upper().strip()
+                    # Basic Validation: Length 5-6 (XXXX3, XXXX11)
+                    if len(t) >= 4 and any(char.isdigit() for char in t):
+                        valid_tickers.append(t)
+            return valid_tickers
+        except Exception as e:
+            if model_name == 'gemma-4-26b-a4b-it':
+                time.sleep(1)
+                continue
+            print(f"Matcher AI Error: {e}")
+            return []
 
 if __name__ == "__main__":
     print("Testing Matcher (Gemma-4-26b-a4b-it)...")
