@@ -16,7 +16,30 @@ Notifications.setNotificationHandler({
   }),
 });
 
+interface SignalEvaluation {
+  status: 'CONSOLIDATED' | 'PARTIAL' | 'REVERSED' | 'EXPIRED_MISSED' | 'TRACKING' | 'TRACKING_ADVERSE' | string;
+  status_label?: string;
+  status_badge?: string;
+  consolidated?: boolean;
+  trading_time_to_consolidate_str?: string;
+  entry_price?: number;
+  latest_price?: number;
+  latest_change_pct?: number;
+  max_favorable_pct?: number;
+  max_adverse_pct?: number;
+  target_threshold_pct?: number;
+  verdict?: string;
+  scores?: {
+    signal: number;
+    impact: number;
+    sentiment: number;
+    reason: number;
+    overall: number;
+  };
+}
+
 interface Signal {
+  id?: string;
   title: string | null;
   body: string | null;
   date: string;
@@ -26,6 +49,7 @@ interface Signal {
     source_type?: string;
     source_name?: string;
   };
+  evaluation?: SignalEvaluation;
 }
 
 export default function HomeScreen() {
@@ -36,6 +60,7 @@ export default function HomeScreen() {
   const [signals, setSignals] = useState<Signal[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [refreshing, setRefreshing] = useState(false);
+  const [expandedEvalIndex, setExpandedEvalIndex] = useState<number | null>(null);
 
   // Filters
   const [filterType, setFilterType] = useState<'ALL' | 'BUY' | 'SELL'>('ALL');
@@ -52,12 +77,14 @@ export default function HomeScreen() {
       if (Array.isArray(data)) {
         setSignals(prev => {
           const newSignals: Signal[] = data.map((item: any) => ({
+            id: item.id,
             title: item.title,
             body: item.body,
             // Timestamp is numeric seconds in history.json
             date: new Date(item.timestamp * 1000).toLocaleTimeString(),
             url: item.data?.url,
-            data: item.data
+            data: item.data,
+            evaluation: item.evaluation
           }));
 
           // History comes oldest-first (append), we want newest-first in UI
@@ -192,15 +219,103 @@ export default function HomeScreen() {
             if (sourceType === 'INTERPRETACAO') { badgeColor = '#FFF3E0'; badgeTextColor = '#E65100'; }
             else if (sourceType === 'PERCEPCAO') { badgeColor = '#FCE4EC'; badgeTextColor = '#C2185B'; }
 
+            const ev = sig.evaluation;
+            let evalBg = '#FFF8E1';
+            let evalBorder = '#FFE082';
+            let evalText = '#E65100';
+            let evalLabel = ev?.status_badge || '⏳ Em Observação';
+
+            if (ev) {
+              if (ev.status === 'CONSOLIDATED') {
+                evalBg = '#E8F5E9';
+                evalBorder = '#A5D6A7';
+                evalText = '#1B5E20';
+              } else if (ev.status === 'PARTIAL') {
+                evalBg = '#E3F2FD';
+                evalBorder = '#90CAF9';
+                evalText = '#0D47A1';
+              } else if (ev.status === 'REVERSED' || ev.status === 'TRACKING_ADVERSE') {
+                evalBg = '#FFEBEE';
+                evalBorder = '#EF9A9A';
+                evalText = '#B71C1C';
+              } else if (ev.status === 'EXPIRED_MISSED') {
+                evalBg = '#F5F5F5';
+                evalBorder = '#BDBDBD';
+                evalText = '#616161';
+              }
+            }
+
+            const isExpanded = expandedEvalIndex === index;
+
             return (
-              <TouchableOpacity key={index} style={[styles.card, sig.title?.includes('SELL') ? { borderLeftColor: '#F44336' } : { borderLeftColor: '#4CAF50' }]} onPress={() => sig.url && Linking.openURL(sig.url)}>
+              <TouchableOpacity
+                key={index}
+                style={[styles.card, sig.title?.includes('SELL') ? { borderLeftColor: '#F44336' } : { borderLeftColor: '#4CAF50' }]}
+                onPress={() => sig.url && Linking.openURL(sig.url)}
+              >
                 <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>
                   <Text style={styles.cardTitle}>{sig.title}</Text>
                   <View style={{ backgroundColor: badgeColor, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 }}>
                     <Text style={{ color: badgeTextColor, fontSize: 10, fontWeight: 'bold' }}>{sourceType}</Text>
                   </View>
                 </View>
+
+                {/* Evaluation Status Badge */}
+                {ev && (
+                  <TouchableOpacity
+                    onPress={() => setExpandedEvalIndex(isExpanded ? null : index)}
+                    style={{
+                      backgroundColor: evalBg,
+                      borderColor: evalBorder,
+                      borderWidth: 1,
+                      paddingHorizontal: 8,
+                      paddingVertical: 4,
+                      borderRadius: 6,
+                      marginBottom: 8,
+                      flexDirection: 'row',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                    }}
+                  >
+                    <Text style={{ color: evalText, fontSize: 11, fontWeight: 'bold' }}>
+                      {evalLabel}
+                      {ev.scores?.overall !== undefined ? ` • Nota: ${ev.scores.overall}/100` : ''}
+                    </Text>
+                    <Text style={{ color: evalText, fontSize: 10, fontWeight: '600' }}>
+                      {isExpanded ? '▲ Ocultar' : '▼ Ver Auditoria'}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+
                 <Text style={styles.cardBody}>{sig.body}</Text>
+
+                {/* Expandable Evaluation Details Panel */}
+                {ev && isExpanded && (
+                  <View style={{ backgroundColor: '#F8FAFC', borderColor: '#E2E8F0', borderWidth: 1, borderRadius: 8, padding: 10, marginTop: 10 }}>
+                    {ev.entry_price !== undefined && ev.latest_price !== undefined && (
+                      <Text style={{ fontSize: 12, color: '#333', marginBottom: 4 }}>
+                        📈 <Text style={{ fontWeight: 'bold' }}>B3:</Text> R$ {ev.entry_price.toFixed(2)} → R$ {ev.latest_price.toFixed(2)} ({ev.latest_change_pct && ev.latest_change_pct >= 0 ? '+' : ''}{ev.latest_change_pct ?? 0}%)
+                        {'  '}| Pico a favor: <Text style={{ fontWeight: 'bold', color: '#2E7D32' }}>{ev.max_favorable_pct && ev.max_favorable_pct >= 0 ? '+' : ''}{ev.max_favorable_pct ?? 0}%</Text>
+                      </Text>
+                    )}
+                    {ev.consolidated && ev.trading_time_to_consolidate_str && (
+                      <Text style={{ fontSize: 12, color: '#1B5E20', fontWeight: '600', marginBottom: 4 }}>
+                        ⏱️ Consolidou (≥70% da meta) em {ev.trading_time_to_consolidate_str} de pregão
+                      </Text>
+                    )}
+                    {ev.scores && (
+                      <Text style={{ fontSize: 11, color: '#555', marginBottom: 4 }}>
+                        🎯 <Text style={{ fontWeight: 'bold' }}>Acerto:</Text> Signal {ev.scores.signal}% • Impact {ev.scores.impact}% • Sentiment {ev.scores.sentiment}% • Reason {ev.scores.reason}%
+                      </Text>
+                    )}
+                    {ev.verdict && (
+                      <Text style={{ fontSize: 11, color: '#444', fontStyle: 'italic' }}>
+                        💬 {ev.verdict}
+                      </Text>
+                    )}
+                  </View>
+                )}
+
                 {sig.url && (
                   <View style={{ backgroundColor: '#eee', padding: 8, borderRadius: 6, marginTop: 10, alignSelf: 'flex-start' }}>
                     <Text style={{ fontWeight: '500', color: '#333' }}>

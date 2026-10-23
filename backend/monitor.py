@@ -17,6 +17,7 @@ try:
     from matcher import find_matches
     from brain import analyze_news, configure_genai
     from push import send_push_notification
+    from evaluator import evaluate_all_signals, fetch_current_b3_price
     # Fallbacks not needed if sys.path is correct
 except ImportError as e:
     print(f"Startup Import Error: {e}")
@@ -26,6 +27,7 @@ except ImportError as e:
         from backend.matcher import find_matches
         from backend.brain import analyze_news, configure_genai
         from backend.push import send_push_notification
+        from backend.evaluator import evaluate_all_signals, fetch_current_b3_price
     except:
         print("CRITICAL: importing modules failed.")
         raise
@@ -35,6 +37,7 @@ except ImportError:
     from backend.matcher import find_matches
     from backend.brain import analyze_news, configure_genai
     from backend.push import send_push_notification
+    from backend.evaluator import evaluate_all_signals, fetch_current_b3_price
 
 # Configuration
 # Configuration
@@ -128,16 +131,28 @@ def heartbeat_loop():
             pass
         time.sleep(15) # Update every 15s
 
+def evaluator_loop():
+    """Background daemon that periodically evaluates alert accuracy against B3 prices and subsequent news."""
+    time.sleep(5)
+    while True:
+        try:
+            evaluate_all_signals(force_recalculate=False)
+        except Exception as e:
+            print(f"Background evaluator error: {e}")
+        time.sleep(180) # Evaluate every 3 minutes
+
 def main():
     print("Starting B3 News Monitor...")
     configure_genai()
     
     seen_links = load_seen()
     
-    # Start Heartbeat
+    # Start Heartbeat & Background Evaluator
     import threading
     t = threading.Thread(target=heartbeat_loop, daemon=True)
     t.start()
+    eval_thread = threading.Thread(target=evaluator_loop, daemon=True)
+    eval_thread.start()
     
     # Prepare for multi-user support
     import json
@@ -233,10 +248,23 @@ def main():
                                 
                                 print(f"Sending V3 Notification: {push_title} (Impact: {impact_val}%)")
                                 
+                                initial_price = None
+                                try:
+                                    initial_price = fetch_current_b3_price(tickers[0])
+                                except Exception:
+                                    initial_price = None
+
                                 push_data = {
                                     "url": link,
                                     "source_type": source_type,
-                                    "source_name": source_name
+                                    "source_name": source_name,
+                                    "ticker": tickers[0],
+                                    "signal": analysis.get("signal"),
+                                    "sentiment": analysis.get("sentiment", "POSITIVE" if analysis.get("signal") == "BUY" else "NEGATIVE"),
+                                    "impact": impact_str,
+                                    "reason": analysis.get("reason", ""),
+                                    "news_title": title,
+                                    "initial_price": initial_price
                                 }
 
                                 # Save to signals DB (Always save, regardless of user prefs)
