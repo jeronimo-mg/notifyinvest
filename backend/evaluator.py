@@ -785,10 +785,14 @@ def evaluate_all_signals(force_recalculate=False, max_signals_to_eval=15):
                     continue
 
             try:
-                allow_ai = force_recalculate and (ai_calls_this_run < 2)
+                needs_ai_once = (
+                    (existing is None)
+                    or (existing.get("status") == "CONSOLIDATED" and not existing.get("ai_evaluation"))
+                )
+                allow_ai = (force_recalculate or needs_ai_once) and (ai_calls_this_run < 1)
                 res = evaluate_single_signal(sig, existing_eval=existing, force_ai=allow_ai)
                 if res:
-                    if res.get("ai_evaluation") and not (existing or {}).get("ai_evaluation"):
+                    if allow_ai and res.get("ai_evaluation"):
                         ai_calls_this_run += 1
                     evals[sig_id] = res
                     # Incremental save so evaluations.json is always available immediately
@@ -797,7 +801,7 @@ def evaluate_all_signals(force_recalculate=False, max_signals_to_eval=15):
                     store["last_run"] = time.time()
                     save_evaluations(store)
                 # Gentle pause to avoid CPU spike on 1-OCPU VM
-                time.sleep(1.0)
+                time.sleep(0.5)
             except Exception as e:
                 print(f"Error evaluating signal {sig_id}: {e}")
 

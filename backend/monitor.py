@@ -324,6 +324,16 @@ def main():
             CURRENT_MESSAGE = "Burst Mode: Checking again..."
             time.sleep(10) # Small buffer to be polite to the RSS server (avoid instant ban)
         else:
+            # Run B3 price consolidation check sequentially (single-threaded) every 10 minutes while idle
+            if (time.time() - last_eval_run) >= 600:
+                try:
+                    CURRENT_MESSAGE = "Updating B3 alert evaluations..."
+                    update_status(CURRENT_MESSAGE)
+                    evaluate_all_signals(force_recalculate=False, max_signals_to_eval=6)
+                except Exception as eval_err:
+                    print(f"Sequential evaluator error: {eval_err}")
+                last_eval_run = time.time()
+
             print(f"No new items. Sleeping for {POLL_INTERVAL}s...")
             CURRENT_MESSAGE = f"Sleeping ({POLL_INTERVAL}s)..."
             update_status(CURRENT_MESSAGE)

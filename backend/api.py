@@ -790,7 +790,7 @@ def api_run_evaluations():
         force = bool(request.json.get("force", True))
     else:
         force = True
-    store = evaluate_all_signals(force_recalculate=force, max_signals_to_eval=15)
+    store = evaluate_all_signals(force_recalculate=force, max_signals_to_eval=8)
     return jsonify({
         "status": "ok",
         "summary": store.get("summary", {}),
