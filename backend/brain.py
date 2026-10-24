@@ -44,11 +44,22 @@ def _parse_json_object(raw_text):
 
 async def _analyze_with_gemini_3_8_live(ticker, title, summary):
     """
-    Stage 1: Connects to 'gemini-3.8-live-extended-thinking' via the Live API,
-    sends the B3 news item, and monitors 'interaction_status' (IN_PROGRESS vs IDLE)
-    while background extended thinking and audio transcription stream in.
+    Stage 1: Connects directly to 'models/gemini-3.8-live-extended-thinking' via the
+    Gemini Live WebSocket API (BidiGenerateContent v1beta).
+    Using direct WebSocket JSON frames bypasses outdated Python 3.9 Pydantic schemas
+    for 'thinking_level' and 'interactionStatus' while supporting full asynchronous
+    background reasoning (IN_PROGRESS -> IDLE).
     """
-    live_client = configure_live_genai()
+    try:
+        from websockets.asyncio.client import connect as ws_connect
+    except ImportError:
+        from websockets import connect as ws_connect
+
+    uri = (
+        "wss://generativelanguage.googleapis.com/ws/"
+        "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+        f"?key={API_KEY}"
+    )
 
     system_instruction = (
         "Você é um analista financeiro sênior especialista na Bolsa de Valores do Brasil (B3). "
@@ -60,22 +71,27 @@ async def _analyze_with_gemini_3_8_live(ticker, title, summary):
         "4) Uma justificativa concisa de 1 frase em português."
     )
 
-    # Note: On gemini-3.8-live-extended-thinking:
-    # - response_modalities must be ["AUDIO"]
-    # - output_audio_transcription={} enables real-time text transcript of the audio response
-    # - thinking_config supports thinking_level="low"|"medium"|"high" (not "minimal") and include_thoughts=True
-    # - proactive_audio is permanently enabled by default (do not set proactive_audio=False)
-    config = types.LiveConnectConfig(
-        response_modalities=["AUDIO"],
-        output_audio_transcription={},
-        thinking_config=types.ThinkingConfig(
-            thinking_level="high",
-            include_thoughts=True,
-        ),
-        system_instruction=types.Content(
-            parts=[types.Part(text=system_instruction)]
-        ),
-    )
+    # Wire format for Gemini 3.8 Live Extended Thinking setup:
+    # - responseModalities: ["AUDIO"]
+    # - thinkingConfig: {"include_thoughts": True, "thinking_level": "HIGH"}
+    # - outputAudioTranscription: {}
+    # - proactive_audio is permanently enabled by default on 3.8 Live
+    setup_payload = {
+        "setup": {
+            "model": "models/gemini-3.8-live-extended-thinking",
+            "generationConfig": {
+                "responseModalities": ["AUDIO"],
+                "thinkingConfig": {
+                    "include_thoughts": True,
+                    "thinking_level": "HIGH",
+                },
+            },
+            "systemInstruction": {
+                "parts": [{"text": system_instruction}]
+            },
+            "outputAudioTranscription": {},
+        }
+    }
 
     user_prompt = (
         f"Analise esta notícia para a ação {ticker} na B3:\n"
@@ -85,59 +101,76 @@ async def _analyze_with_gemini_3_8_live(ticker, title, summary):
         f"a estimativa de impacto percentual (+/-X%) e o motivo em 1 frase?"
     )
 
+    client_content_payload = {
+        "client_content": {
+            "turns": [
+                {
+                    "role": "user",
+                    "parts": [{"text": user_prompt}],
+                }
+            ],
+            "turn_complete": True,
+        }
+    }
+
     thoughts_chunks = []
     transcript_chunks = []
     text_chunks = []
 
-    async with live_client.aio.live.connect(
-        model="gemini-3.8-live-extended-thinking",
-        config=config
-    ) as session:
-        await session.send_client_content(
-            turns={"role": "user", "parts": [{"text": user_prompt}]},
-            turn_complete=True,
-        )
+    async with ws_connect(uri) as ws:
+        # 1. Send Setup message and await setupComplete
+        await ws.send(json.dumps(setup_payload))
+        setup_raw = await ws.recv()
+        if isinstance(setup_raw, bytes):
+            setup_raw = setup_raw.decode("utf-8")
+        setup_resp = json.loads(setup_raw)
+        if "error" in setup_resp:
+            raise RuntimeError(f"Live API Setup Error: {setup_resp['error']}")
 
-        # Asynchronous reasoning loop monitoring interaction_status (IN_PROGRESS vs IDLE).
-        # With Extended Thinking, turn_complete=True does NOT mean the session is idle if
-        # interaction_status is still IN_PROGRESS.
-        is_idle = False
-        while not is_idle:
-            received_any = False
-            async for response in session.receive():
-                received_any = True
-                sc = response.server_content
-                if not sc:
-                    continue
+        # 2. Send User News Prompt
+        await ws.send(json.dumps(client_content_payload))
 
-                # 1. Capture thought summaries and text parts from model_turn
-                if sc.model_turn and sc.model_turn.parts:
-                    for part in sc.model_turn.parts:
-                        if getattr(part, "thought", False) and getattr(part, "text", None):
-                            thoughts_chunks.append(part.text)
-                        elif getattr(part, "text", None):
-                            text_chunks.append(part.text)
+        # 3. Asynchronous reasoning loop monitoring interactionStatus (IN_PROGRESS vs IDLE).
+        # With Extended Thinking, turnComplete=True does NOT mean the session is idle if
+        # interactionStatus is still IN_PROGRESS.
+        while True:
+            raw_msg = await ws.recv()
+            if isinstance(raw_msg, bytes):
+                raw_msg = raw_msg.decode("utf-8")
+            msg = json.loads(raw_msg)
 
-                # 2. Capture real-time output audio transcription
-                if sc.output_transcription and getattr(sc.output_transcription, "text", None):
-                    transcript_chunks.append(sc.output_transcription.text)
+            if "error" in msg:
+                raise RuntimeError(f"Live API Stream Error: {msg['error']}")
 
-                # 3. Check interaction_status (IN_PROGRESS vs IDLE)
-                raw_status = getattr(sc, "interaction_status", None)
-                status_str = str(raw_status or "").upper()
+            sc = msg.get("serverContent") or msg.get("server_content")
+            if not sc:
+                continue
 
-                if "IDLE" in status_str:
-                    is_idle = True
-                    break
-                elif "IN_PROGRESS" in status_str:
-                    # Background reasoning is still active; keep listening even if turn_complete is True
-                    continue
-                elif sc.turn_complete and not status_str:
-                    # Fallback if server frame omits interaction_status
-                    is_idle = True
-                    break
+            # 1. Capture thought summaries and text parts from modelTurn
+            model_turn = sc.get("modelTurn") or sc.get("model_turn") or {}
+            for part in model_turn.get("parts") or []:
+                if part.get("thought") and part.get("text"):
+                    thoughts_chunks.append(part["text"])
+                elif part.get("text"):
+                    text_chunks.append(part["text"])
 
-            if not received_any:
+            # 2. Capture real-time output audio transcription
+            out_trans = sc.get("outputTranscription") or sc.get("output_transcription") or {}
+            if out_trans.get("text"):
+                transcript_chunks.append(out_trans["text"])
+
+            # 3. Monitor interactionStatus (IN_PROGRESS vs IDLE)
+            raw_status = sc.get("interactionStatus") or sc.get("interaction_status") or ""
+            status_str = str(raw_status).upper()
+            turn_complete = bool(sc.get("turnComplete") or sc.get("turn_complete"))
+
+            if "IDLE" in status_str:
+                break
+            elif "IN_PROGRESS" in status_str:
+                # Background extended thinking is still running; keep listening even if turnComplete is True
+                continue
+            elif turn_complete and not status_str:
+                # Fallback if server frame omits interactionStatus
                 break
 
     combined_sections = []
