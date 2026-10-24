@@ -68,13 +68,82 @@ def _parse_json_object(raw_text):
     return json.loads(text)
 
 
-async def _analyze_with_gemini_3_8_live(ticker, title, summary):
+def _is_valid_live_analysis(text):
     """
-    Stage 1: Connects directly to 'models/gemini-3.8-live-extended-thinking' via the
-    Gemini Live WebSocket API (BidiGenerateContent v1beta).
-    Using direct WebSocket JSON frames bypasses outdated Python 3.9 Pydantic schemas
-    for 'thinking_level' and 'interactionStatus' while supporting full asynchronous
-    background reasoning (IN_PROGRESS -> IDLE).
+    Checks whether the transcription/output from Gemini 3.8 Live contains an actual
+    financial analysis rather than just a conversational filler or a backend 'system error' apology.
+    """
+    if not text or not text.strip():
+        return False
+    lower = text.lower()
+    error_phrases = (
+        "erro no sistema",
+        "system error",
+        "ocorreu um erro",
+        "error occurred",
+        "não consegui processar",
+        "unable to process",
+    )
+    if any(phrase in lower for phrase in error_phrases):
+        return False
+    # Strip section headers to check actual content length
+    cleaned = re.sub(r"parecer falado \(transcrição.*?\):", "", lower)
+    cleaned = re.sub(r"texto gerado \(.*?\):", "", cleaned)
+    cleaned = re.sub(r"raciocínio estendido \(.*?\):", "", cleaned).strip()
+    if len(cleaned) < 40:
+        return False
+    return True
+
+
+def _extract_structured_from_live_text(live_text):
+    """
+    Fallback parser if Gemma 4 endpoints are temporarily unavailable (500/503)
+    after Gemini 3.8 Live has already produced a valid spoken analysis.
+    """
+    upper = live_text.upper()
+    sentiment = "NEUTRAL"
+    if "POSITIVE" in upper or "POSITIVO" in upper or "POSITIVA" in upper or "OTIMISTA" in upper:
+        sentiment = "POSITIVE"
+    elif "NEGATIVE" in upper or "NEGATIVO" in upper or "NEGATIVA" in upper or "PESSIMISTA" in upper:
+        sentiment = "NEGATIVE"
+
+    signal = "HOLD"
+    if re.search(r"\b(BUY|COMPRA|COMPRAR)\b", upper):
+        signal = "BUY"
+    elif re.search(r"\b(SELL|VENDA|VENDER)\b", upper):
+        signal = "SELL"
+
+    impact = "0%"
+    imp_match = re.search(r"([+-]?\s*\d+(?:[.,]\d+)?\s*%)", live_text)
+    if imp_match:
+        impact = imp_match.group(1).replace(" ", "").replace(",", ".")
+        if not impact.startswith(("+", "-")) and impact != "0%":
+            if sentiment == "POSITIVE":
+                impact = "+" + impact
+            elif sentiment == "NEGATIVE":
+                impact = "-" + impact
+
+    # Extract clean spoken text as reason
+    reason = live_text
+    if ":" in reason:
+        reason = reason.split(":", 1)[1].strip()
+    reason = re.sub(r"\s+", " ", reason).strip()
+    if len(reason) > 220:
+        reason = reason[:217].rstrip() + "..."
+
+    return {
+        "signal": signal,
+        "sentiment": sentiment,
+        "impact": impact,
+        "reason": reason or "Análise gerada via Gemini 3.8 Live",
+    }
+
+
+async def _run_live_ws_session(model_id, ticker, title, summary, thinking_level=None):
+    """
+    Runs a single WebSocket BidiGenerateContent session against the specified Gemini 3.8 Live model,
+    monitoring interactionStatus (IN_PROGRESS / THINKING / RESPONDING -> IDLE) and collecting
+    outputAudioTranscription + modelTurn parts.
     """
     try:
         from websockets.asyncio.client import connect as ws_connect
@@ -89,29 +158,28 @@ async def _analyze_with_gemini_3_8_live(ticker, title, summary):
 
     system_instruction = (
         "Você é um analista financeiro sênior especialista na Bolsa de Valores do Brasil (B3). "
-        "Para toda notícia enviada pelo usuário, responda sempre de forma direta e analítica em português, "
-        "avaliando o impacto para a ação indicada. Informe claramente: "
+        "IMPORTANTE: Você já possui todas as informações necessárias na mensagem do usuário. "
+        "NÃO tente acionar ferramentas externas, NÃO faça buscas e NÃO fale frases introdutórias de espera "
+        "como 'Vou analisar' ou 'Deixe-me verificar'. "
+        "Vá direto ao ponto na primeira resposta em português, informando: "
         "1) O sentimento da notícia para o ativo (POSITIVE, NEGATIVE ou NEUTRAL); "
         "2) O sinal recomendado (BUY, SELL ou HOLD, sendo conservador); "
         "3) A estimativa percentual de impacto no curto prazo (ex: +2%, -4%, 0%); "
         "4) Uma justificativa concisa de 1 frase em português."
     )
 
-    # Wire format for Gemini 3.8 Live Extended Thinking setup:
-    # - responseModalities: ["AUDIO"]
-    # - thinkingConfig: {"include_thoughts": True, "thinking_level": "HIGH"}
-    # - outputAudioTranscription: {}
-    # - proactive_audio is permanently enabled by default on 3.8 Live
+    gen_config = {
+        "responseModalities": ["AUDIO"],
+    }
+    if thinking_level:
+        gen_config["thinkingConfig"] = {
+            "thinkingLevel": thinking_level,
+        }
+
     setup_payload = {
         "setup": {
-            "model": "models/gemini-3.8-live-extended-thinking",
-            "generationConfig": {
-                "responseModalities": ["AUDIO"],
-                "thinkingConfig": {
-                    "include_thoughts": True,
-                    "thinking_level": "HIGH",
-                },
-            },
+            "model": model_id,
+            "generationConfig": gen_config,
             "systemInstruction": {
                 "parts": [{"text": system_instruction}]
             },
@@ -120,22 +188,23 @@ async def _analyze_with_gemini_3_8_live(ticker, title, summary):
     }
 
     user_prompt = (
-        f"Analise esta notícia para a ação {ticker} na B3:\n"
+        f"Dados completos da notícia sobre a ação {ticker} na B3:\n"
         f"Título: {title}\n"
         f"Resumo: {summary}\n\n"
-        f"Qual é o sentimento (POSITIVE/NEGATIVE/NEUTRAL), o sinal (BUY/SELL/HOLD), "
-        f"a estimativa de impacto percentual (+/-X%) e o motivo em 1 frase?"
+        f"Sem usar ferramentas externas e sem frases de espera, diga diretamente o sentimento "
+        f"(POSITIVE, NEGATIVE ou NEUTRAL), o sinal (BUY, SELL ou HOLD), "
+        f"a estimativa de impacto percentual (+/-X%) e a justificativa em 1 frase."
     )
 
     client_content_payload = {
-        "client_content": {
+        "clientContent": {
             "turns": [
                 {
                     "role": "user",
                     "parts": [{"text": user_prompt}],
                 }
             ],
-            "turn_complete": True,
+            "turnComplete": True,
         }
     }
 
@@ -144,28 +213,19 @@ async def _analyze_with_gemini_3_8_live(ticker, title, summary):
     text_chunks = []
 
     async with ws_connect(uri) as ws:
-        # 1. Send Setup message and await setupComplete
         await ws.send(json.dumps(setup_payload))
         setup_raw = await ws.recv()
         if isinstance(setup_raw, bytes):
             setup_raw = setup_raw.decode("utf-8")
         setup_resp = json.loads(setup_raw)
         if "error" in setup_resp:
-            raise RuntimeError(f"Live API Setup Error: {setup_resp['error']}")
+            raise RuntimeError(f"Live API Setup Error ({model_id}): {setup_resp['error']}")
 
-        # 2. Send User News Prompt
         await ws.send(json.dumps(client_content_payload))
 
-        # 3. Asynchronous reasoning loop monitoring interactionStatus (IN_PROGRESS vs IDLE).
-        # According to the Gemini 3.8 Live Extended Thinking protocol:
-        # - interactionStatus is always sent alongside turnComplete.
-        # - When the model gives an initial verbal cue ("Deixe-me analisar...") and starts
-        #   background reasoning, it sends turnComplete=True with interactionStatus="IN_PROGRESS".
-        # - While IN_PROGRESS, background reasoning may take 5-20s before streaming the final answer.
-        # - Once the final answer finishes, it sends turnComplete=True with interactionStatus="IDLE".
         last_status = "IN_PROGRESS"
         while True:
-            recv_timeout = 25.0 if "IN_PROGRESS" in last_status else 5.0
+            recv_timeout = 25.0 if ("IN_PROGRESS" in last_status or "THINKING" in last_status) else 6.0
             try:
                 raw_msg = await asyncio.wait_for(ws.recv(), timeout=recv_timeout)
             except asyncio.TimeoutError:
@@ -176,11 +236,9 @@ async def _analyze_with_gemini_3_8_live(ticker, title, summary):
             msg = json.loads(raw_msg)
 
             if "error" in msg:
-                raise RuntimeError(f"Live API Stream Error: {msg['error']}")
+                raise RuntimeError(f"Live API Stream Error ({model_id}): {msg['error']}")
 
-            sc = msg.get("serverContent") or msg.get("server_content")
-            if not sc:
-                continue
+            sc = msg.get("serverContent") or msg.get("server_content") or {}
 
             # 1. Capture thought summaries and text parts from modelTurn
             model_turn = sc.get("modelTurn") or sc.get("model_turn") or {}
@@ -195,8 +253,14 @@ async def _analyze_with_gemini_3_8_live(ticker, title, summary):
             if out_trans.get("text"):
                 transcript_chunks.append(out_trans["text"])
 
-            # 3. Monitor interactionStatus (IN_PROGRESS vs IDLE)
-            raw_status = sc.get("interactionStatus") or sc.get("interaction_status") or ""
+            # 3. Monitor interactionStatus at both top-level message and serverContent
+            raw_status = (
+                msg.get("interactionStatus")
+                or msg.get("interaction_status")
+                or sc.get("interactionStatus")
+                or sc.get("interaction_status")
+                or ""
+            )
             status_str = str(raw_status).upper()
             if status_str:
                 last_status = status_str
@@ -205,30 +269,65 @@ async def _analyze_with_gemini_3_8_live(ticker, title, summary):
 
             if "IDLE" in status_str:
                 break
-            elif "IN_PROGRESS" in status_str:
-                # Background extended thinking is actively running; keep waiting (up to 25s) for the next turn
+            elif any(s in status_str for s in ("IN_PROGRESS", "THINKING", "RESPONDING", "LISTENING")):
                 continue
-            elif turn_complete and "IN_PROGRESS" not in last_status:
+            elif turn_complete and not any(s in last_status for s in ("IN_PROGRESS", "THINKING")):
                 break
 
     combined_sections = []
     if transcript_chunks:
-        combined_sections.append("Parecer falado (Transcrição Gemini 3.8 Live): " + "".join(transcript_chunks).strip())
+        combined_sections.append(f"Parecer falado (Transcrição {model_id}): " + "".join(transcript_chunks).strip())
     if text_chunks:
-        combined_sections.append("Texto gerado (Gemini 3.8 Live): " + "".join(text_chunks).strip())
+        combined_sections.append(f"Texto gerado ({model_id}): " + "".join(text_chunks).strip())
     if thoughts_chunks:
         combined_sections.append("Raciocínio estendido (Extended Thinking): " + "\n".join(thoughts_chunks).strip())
 
     return "\n\n".join(combined_sections).strip()
 
 
+async def _analyze_with_gemini_3_8_live(ticker, title, summary):
+    """
+    Stage 1: Connects first to 'models/gemini-3.8-live-extended-thinking' via the
+    Gemini Live WebSocket API (BidiGenerateContent v1beta), monitoring interactionStatus
+    (IN_PROGRESS -> IDLE). If the extended-thinking background sub-agent emits a spoken
+    'system error' apology, automatically retries Stage 1 with 'models/gemini-3.8-live'.
+    """
+    # Primary attempt: Gemini 3.8 Live Extended Thinking
+    text = await _run_live_ws_session(
+        model_id="models/gemini-3.8-live-extended-thinking",
+        ticker=ticker,
+        title=title,
+        summary=summary,
+        thinking_level="LOW",
+    )
+    if _is_valid_live_analysis(text):
+        return text
+
+    print(
+        f"[{ticker}] gemini-3.8-live-extended-thinking returned filler/system-error ({text!r}); "
+        f"retrying Stage 1 with models/gemini-3.8-live...",
+        flush=True,
+    )
+    text_fallback = await _run_live_ws_session(
+        model_id="models/gemini-3.8-live",
+        ticker=ticker,
+        title=title,
+        summary=summary,
+        thinking_level=None,
+    )
+    if _is_valid_live_analysis(text_fallback):
+        return text_fallback
+
+    return ""
+
+
 def analyze_news(ticker, title, summary):
     """
     Two-stage news analysis pipeline:
-    1. Stage 1 (Deep Financial Reasoning): Uses 'gemini-3.8-live-extended-thinking' via Live API
-       monitoring asynchronous interaction_status (IN_PROGRESS -> IDLE).
-    2. Stage 2 (Structured JSON Formatting): Sends the Gemini 3.8 analysis to Gemma
-       ('gemma-4-31b-it' -> 'gemma-4-26b-a4b-it' -> 'gemma-3-27b-it') to produce the strict JSON output.
+    1. Stage 1 (Deep Financial Reasoning): Uses 'gemini-3.8-live-extended-thinking' (with automatic
+       Live fallback to 'gemini-3.8-live') via Live API monitoring interaction_status (IN_PROGRESS -> IDLE).
+    2. Stage 2 (Structured JSON Formatting): Sends the Gemini 3.8 analysis to Gemma 4
+       ('gemma-4-31b-it' and 'gemma-4-26b-a4b-it' with multi-round backoff retries) to produce strict JSON.
     """
     import time as _time
     try:
@@ -244,28 +343,28 @@ def analyze_news(ticker, title, summary):
         live_analysis_text = asyncio.run(
             asyncio.wait_for(
                 _analyze_with_gemini_3_8_live(ticker, title, summary),
-                timeout=55.0
+                timeout=65.0
             )
         )
         if live_analysis_text:
             preview = live_analysis_text.replace("\n", " ")[:220]
-            print(f"[{ticker}] Gemini 3.8 Extended Thinking output captured ({len(live_analysis_text)} chars): {preview}...", flush=True)
+            print(f"[{ticker}] Gemini 3.8 Live output captured ({len(live_analysis_text)} chars): {preview}...", flush=True)
         else:
-            print(f"[{ticker}] Gemini 3.8 returned empty output; Gemma will analyze directly.", flush=True)
+            print(f"[{ticker}] Gemini 3.8 Live returned no valid analysis; Gemma 4 will analyze directly.", flush=True)
     except Exception as live_err:
-        print(f"Warning: gemini-3.8-live-extended-thinking stage failed ({live_err}). Falling back to direct Gemma analysis...", flush=True)
+        print(f"Warning: gemini-3.8-live-extended-thinking stage failed ({live_err}). Falling back to direct Gemma 4 analysis...", flush=True)
         live_analysis_text = ""
 
-    # Stage 2: Gemma Structured Output Extraction (or fallback direct analysis)
+    # Stage 2: Gemma 4 Structured Output Extraction (or fallback direct analysis)
     if live_analysis_text:
         prompt = f"""
     You are a financial data structurer for the Brazilian Stock Market (B3).
-    Below is a news item about {ticker} and the in-depth analysis produced by our senior analyst model (Gemini 3.8 Live Extended Thinking).
+    Below is a news item about {ticker} and the in-depth analysis produced by our senior analyst model (Gemini 3.8 Live).
 
     News Title: {title}
     News Summary: {summary}
 
-    [GEMINI 3.8 EXTENDED THINKING ANALYSIS]
+    [GEMINI 3.8 LIVE ANALYSIS]
     {live_analysis_text}
 
     Task:
@@ -306,17 +405,29 @@ def analyze_news(ticker, title, summary):
     }}
     """
 
-    for model_name in ('gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemma-3-27b-it'):
-        try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=prompt
-            )
-            return _parse_json_object(response.text)
-        except Exception as e:
-            print(f"Warning: {model_name} failed ({e}), trying next model...", flush=True)
-            _time.sleep(1.5)
-            continue
+    # Only use the two Gemma 4 models available on the user's account, with 3 retry rounds
+    gemma_4_models = ('gemma-4-31b-it', 'gemma-4-26b-a4b-it')
+    for attempt in range(3):
+        for model_name in gemma_4_models:
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt
+                )
+                return _parse_json_object(response.text)
+            except Exception as e:
+                wait_sec = 2.0 * (attempt + 1)
+                print(
+                    f"Warning: {model_name} (round {attempt + 1}/3) failed ({e}), "
+                    f"waiting {wait_sec:.0f}s before next try...",
+                    flush=True,
+                )
+                _time.sleep(wait_sec)
+                continue
+
+    if live_analysis_text:
+        print(f"[{ticker}] All Gemma 4 retries exhausted; extracting structured fields from Gemini 3.8 Live text.", flush=True)
+        return _extract_structured_from_live_text(live_analysis_text)
 
     return {"signal": "HOLD", "sentiment": "NEUTRAL", "reason": "Erro na análise AI"}
 
@@ -385,18 +496,21 @@ def evaluate_alert_reason(
     }}
     """
 
-    for model_name in ['gemma-4-31b-it', 'gemma-4-26b-a4b-it']:
-        try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=prompt
-            )
-            parsed = _parse_json_object(response.text)
-            if isinstance(parsed, dict) and "reason_score" in parsed:
-                return parsed
-        except Exception as e:
-            print(f"Warning: {model_name} evaluation failed ({e})")
-            continue
+    import time as _time
+    for attempt in range(2):
+        for model_name in ('gemma-4-31b-it', 'gemma-4-26b-a4b-it'):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt
+                )
+                parsed = _parse_json_object(response.text)
+                if isinstance(parsed, dict) and "reason_score" in parsed:
+                    return parsed
+            except Exception as e:
+                print(f"Warning: {model_name} evaluation (round {attempt + 1}/2) failed ({e})")
+                _time.sleep(2.0)
+                continue
 
     return None
 

@@ -89,27 +89,27 @@ def find_matches(title, summary=""):
     Example Output: ["PETR4", "WEGE3"]
     """
     
-    for model_name in ('gemma-4-26b-a4b-it', 'gemma-4-31b-it'):
-        try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=prompt
-            )
-            tickers = _parse_json_array(response.text)
-            valid_tickers = []
-            if isinstance(tickers, list):
-                for t in tickers:
-                    t = str(t).upper().strip()
-                    # Basic Validation: Length 5-6 (XXXX3, XXXX11)
-                    if len(t) >= 4 and any(char.isdigit() for char in t):
-                        valid_tickers.append(t)
-            return valid_tickers
-        except Exception as e:
-            if model_name == 'gemma-4-26b-a4b-it':
-                time.sleep(1)
+    for attempt in range(2):
+        for model_name in ('gemma-4-26b-a4b-it', 'gemma-4-31b-it'):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt
+                )
+                tickers = _parse_json_array(response.text)
+                valid_tickers = []
+                if isinstance(tickers, list):
+                    for t in tickers:
+                        t = str(t).upper().strip()
+                        # Basic Validation: Length 5-6 (XXXX3, XXXX11)
+                        if len(t) >= 4 and any(char.isdigit() for char in t):
+                            valid_tickers.append(t)
+                return valid_tickers
+            except Exception as e:
+                print(f"Warning: Matcher {model_name} (round {attempt + 1}/2) failed ({e})")
+                time.sleep(2.0)
                 continue
-            print(f"Matcher AI Error: {e}")
-            return []
+    return []
 
 if __name__ == "__main__":
     print("Testing Matcher (Gemma-4-26b-a4b-it)...")
