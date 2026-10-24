@@ -133,13 +133,13 @@ def heartbeat_loop():
 
 def evaluator_loop():
     """Background daemon that periodically evaluates alert accuracy against B3 prices and subsequent news."""
-    time.sleep(5)
+    time.sleep(60) # Wait 60s after boot before first light evaluation
     while True:
         try:
-            evaluate_all_signals(force_recalculate=False)
+            evaluate_all_signals(force_recalculate=False, max_signals_to_eval=8)
         except Exception as e:
             print(f"Background evaluator error: {e}")
-        time.sleep(180) # Evaluate every 3 minutes
+        time.sleep(600) # Evaluate every 10 minutes to keep E2.1.Micro CPU/RAM light
 
 def main():
     print("Starting B3 News Monitor...")
