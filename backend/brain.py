@@ -131,10 +131,17 @@ async def _analyze_with_gemini_3_8_live(ticker, title, summary):
         await ws.send(json.dumps(client_content_payload))
 
         # 3. Asynchronous reasoning loop monitoring interactionStatus (IN_PROGRESS vs IDLE).
-        # With Extended Thinking, turnComplete=True does NOT mean the session is idle if
-        # interactionStatus is still IN_PROGRESS.
+        # With Extended Thinking, turnComplete=True may arrive with interactionStatus=IN_PROGRESS
+        # while background reasoning continues. We use a short 4s idle window after any turnComplete
+        # so we capture all follow-up background frames without ever hanging for 60s.
+        seen_turn_complete = False
         while True:
-            raw_msg = await ws.recv()
+            recv_timeout = 4.0 if seen_turn_complete else 25.0
+            try:
+                raw_msg = await asyncio.wait_for(ws.recv(), timeout=recv_timeout)
+            except asyncio.TimeoutError:
+                break
+
             if isinstance(raw_msg, bytes):
                 raw_msg = raw_msg.decode("utf-8")
             msg = json.loads(raw_msg)
@@ -163,11 +170,13 @@ async def _analyze_with_gemini_3_8_live(ticker, title, summary):
             raw_status = sc.get("interactionStatus") or sc.get("interaction_status") or ""
             status_str = str(raw_status).upper()
             turn_complete = bool(sc.get("turnComplete") or sc.get("turn_complete"))
+            if turn_complete:
+                seen_turn_complete = True
 
             if "IDLE" in status_str:
                 break
             elif "IN_PROGRESS" in status_str:
-                # Background extended thinking is still running; keep listening even if turnComplete is True
+                # Background extended thinking is still running; keep listening with 4s window after turnComplete
                 continue
             elif turn_complete and not status_str:
                 # Fallback if server frame omits interactionStatus
@@ -195,25 +204,25 @@ def analyze_news(ticker, title, summary):
     try:
         client = configure_genai()
     except Exception as e:
-        print(f"FATAL: Could not initialize GenAI client. {e}")
+        print(f"FATAL: Could not initialize GenAI client. {e}", flush=True)
         raise e
 
     # Stage 1: Gemini 3.8 Live Extended Thinking
     live_analysis_text = ""
     try:
-        print(f"[{ticker}] Stage 1: Analyzing with gemini-3.8-live-extended-thinking (Live API)...")
+        print(f"[{ticker}] Stage 1: Analyzing with gemini-3.8-live-extended-thinking (Live API)...", flush=True)
         live_analysis_text = asyncio.run(
             asyncio.wait_for(
                 _analyze_with_gemini_3_8_live(ticker, title, summary),
-                timeout=60.0
+                timeout=35.0
             )
         )
         if live_analysis_text:
-            print(f"[{ticker}] Gemini 3.8 Extended Thinking output captured ({len(live_analysis_text)} chars).")
+            print(f"[{ticker}] Gemini 3.8 Extended Thinking output captured ({len(live_analysis_text)} chars).", flush=True)
         else:
-            print(f"[{ticker}] Gemini 3.8 returned empty output (proactive silence or no speech); Gemma will analyze directly.")
+            print(f"[{ticker}] Gemini 3.8 returned empty output; Gemma will analyze directly.", flush=True)
     except Exception as live_err:
-        print(f"Warning: gemini-3.8-live-extended-thinking stage failed ({live_err}). Falling back to direct Gemma analysis...")
+        print(f"Warning: gemini-3.8-live-extended-thinking stage failed ({live_err}). Falling back to direct Gemma analysis...", flush=True)
         live_analysis_text = ""
 
     # Stage 2: Gemma 4 Structured Output Extraction (or fallback direct analysis)
