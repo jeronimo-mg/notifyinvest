@@ -1,17 +1,43 @@
 import asyncio
-from google import genai
-from google.genai import types
+import importlib.util
 import json
 import os
 import re
+import sys
 
-try:
-    from secrets import GEMINI_API_KEY as API_KEY
-except Exception:
-    try:
-        from backend.secrets import GEMINI_API_KEY as API_KEY
-    except Exception:
-        API_KEY = os.getenv("GEMINI_API_KEY")
+def _load_api_key_safely():
+    """
+    Loads GEMINI_API_KEY from backend/secrets.py without shadowing Python's standard
+    library 'secrets' module (which websockets requires for secrets.token_bytes).
+    """
+    backend_dir = os.path.dirname(os.path.abspath(__file__))
+    # Ensure stdlib 'secrets' is loaded into sys.modules['secrets'] first
+    existing = sys.modules.get("secrets")
+    if existing is None or not hasattr(existing, "token_bytes"):
+        sys.modules.pop("secrets", None)
+        saved_path = list(sys.path)
+        try:
+            sys.path = [p for p in sys.path if os.path.abspath(p or ".") != backend_dir]
+            import secrets as _stdlib_secrets  # noqa: F401
+        finally:
+            sys.path = saved_path
+
+    secrets_file = os.path.join(backend_dir, "secrets.py")
+    if os.path.exists(secrets_file):
+        try:
+            spec = importlib.util.spec_from_file_location("_notifyinvest_secrets", secrets_file)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            if getattr(mod, "GEMINI_API_KEY", None):
+                return mod.GEMINI_API_KEY
+        except Exception:
+            pass
+    return os.getenv("GEMINI_API_KEY")
+
+API_KEY = _load_api_key_safely()
+
+from google import genai
+from google.genai import types
 
 if not API_KEY:
     print("WARNING: Gemini API Key not found. Please set GEMINI_API_KEY env var or create backend/secrets.py")

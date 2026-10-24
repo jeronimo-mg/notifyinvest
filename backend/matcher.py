@@ -1,17 +1,37 @@
-from google import genai
+import importlib.util
 import json
 import os
 import re
+import sys
 import time
 
+def _load_api_key_safely():
+    backend_dir = os.path.dirname(os.path.abspath(__file__))
+    existing = sys.modules.get("secrets")
+    if existing is None or not hasattr(existing, "token_bytes"):
+        sys.modules.pop("secrets", None)
+        saved_path = list(sys.path)
+        try:
+            sys.path = [p for p in sys.path if os.path.abspath(p or ".") != backend_dir]
+            import secrets as _stdlib_secrets  # noqa: F401
+        finally:
+            sys.path = saved_path
 
-try:
-    from secrets import GEMINI_API_KEY as API_KEY
-except Exception:
-    try:
-        from backend.secrets import GEMINI_API_KEY as API_KEY
-    except Exception:
-        API_KEY = os.getenv("GEMINI_API_KEY")
+    secrets_file = os.path.join(backend_dir, "secrets.py")
+    if os.path.exists(secrets_file):
+        try:
+            spec = importlib.util.spec_from_file_location("_notifyinvest_secrets", secrets_file)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            if getattr(mod, "GEMINI_API_KEY", None):
+                return mod.GEMINI_API_KEY
+        except Exception:
+            pass
+    return os.getenv("GEMINI_API_KEY")
+
+API_KEY = _load_api_key_safely()
+
+from google import genai
 
 if not API_KEY:
     print("WARNING: Gemini API Key not found. Please set GEMINI_API_KEY env var or create backend/secrets.py")
