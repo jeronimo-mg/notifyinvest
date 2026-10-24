@@ -288,23 +288,24 @@ async def _run_live_ws_session(model_id, ticker, title, summary, thinking_level=
 async def _analyze_with_gemini_3_8_live(ticker, title, summary):
     """
     Stage 1: Connects first to 'models/gemini-3.8-live-extended-thinking' via the
-    Gemini Live WebSocket API (BidiGenerateContent v1beta), monitoring interactionStatus
-    (IN_PROGRESS -> IDLE). If the extended-thinking background sub-agent emits a spoken
-    'system error' apology, automatically retries Stage 1 with 'models/gemini-3.8-live'.
+    Gemini Live WebSocket API (BidiGenerateContent v1beta) with thinkingLevel="HIGH",
+    monitoring interactionStatus (IN_PROGRESS -> IDLE). If the extended-thinking
+    background sub-agent emits a spoken 'system error' apology, automatically retries
+    Stage 1 with 'models/gemini-3.8-live'.
     """
-    # Primary attempt: Gemini 3.8 Live Extended Thinking
+    # Primary attempt: Gemini 3.8 Live Extended Thinking (HIGH depth)
     text = await _run_live_ws_session(
         model_id="models/gemini-3.8-live-extended-thinking",
         ticker=ticker,
         title=title,
         summary=summary,
-        thinking_level="LOW",
+        thinking_level="HIGH",
     )
     if _is_valid_live_analysis(text):
         return text
 
     print(
-        f"[{ticker}] gemini-3.8-live-extended-thinking returned filler/system-error ({text!r}); "
+        f"[{ticker}] gemini-3.8-live-extended-thinking (HIGH) returned filler/system-error ({text!r}); "
         f"retrying Stage 1 with models/gemini-3.8-live...",
         flush=True,
     )
