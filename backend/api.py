@@ -398,16 +398,9 @@ def get_sources():
     return jsonify(sources), 200
 
 def attach_evaluations(signals_list):
-    """Attaches evaluation data to each signal dict if available."""
+    """Attaches evaluation data to each signal dict from evaluations.json (fast read-only)."""
     store = load_evaluations()
     evals = store.get("evaluations", {})
-    # If evaluations store is empty and we have signals, trigger an initial non-blocking evaluation
-    if not evals and signals_list:
-        try:
-            store = evaluate_all_signals(force_recalculate=False, max_signals_to_eval=25)
-            evals = store.get("evaluations", {})
-        except Exception as e:
-            logger.warning(f"Initial evaluation run failed: {e}")
 
     enriched = []
     for s in signals_list:
@@ -781,9 +774,6 @@ def evaluations_page():
 def api_get_evaluations():
     store = load_evaluations()
     evals_dict = store.get("evaluations", {})
-    if not evals_dict:
-        store = evaluate_all_signals(force_recalculate=False, max_signals_to_eval=50)
-        evals_dict = store.get("evaluations", {})
 
     items = list(evals_dict.values())
     items.sort(key=lambda x: x.get("alert_timestamp", 0), reverse=True)
@@ -800,7 +790,7 @@ def api_run_evaluations():
         force = bool(request.json.get("force", True))
     else:
         force = True
-    store = evaluate_all_signals(force_recalculate=force, max_signals_to_eval=50)
+    store = evaluate_all_signals(force_recalculate=force, max_signals_to_eval=15)
     return jsonify({
         "status": "ok",
         "summary": store.get("summary", {}),

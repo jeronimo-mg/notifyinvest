@@ -724,64 +724,97 @@ def compute_global_summary(evaluations_dict):
     }
 
 
-def evaluate_all_signals(force_recalculate=False, max_signals_to_eval=100):
+def evaluate_all_signals(force_recalculate=False, max_signals_to_eval=15):
     """
-    Loads signals.json, evaluates new or active signals, updates evaluations.json,
-    and returns the complete store.
+    Loads signals.json, evaluates new or active signals with low CPU/RAM footprint,
+    saves evaluations.json incrementally, and returns the complete store.
     """
-    if not os.path.exists(SIGNALS_FILE):
+    lock_file = "/tmp/notifyinvest_eval.lock"
+    now_ts = time.time()
+    # Prevent concurrent runs across processes/threads
+    if os.path.exists(lock_file):
+        try:
+            if (now_ts - os.path.getmtime(lock_file)) < 120:
+                return load_evaluations()
+        except Exception:
+            pass
+
+    try:
+        with open(lock_file, "w") as lf:
+            lf.write(str(os.getpid()))
+    except Exception:
+        pass
+
+    try:
+        if not os.path.exists(SIGNALS_FILE):
+            store = load_evaluations()
+            store["summary"] = compute_global_summary(store.get("evaluations", {}))
+            store["last_run"] = time.time()
+            save_evaluations(store)
+            return store
+
+        try:
+            with open(SIGNALS_FILE, "r") as f:
+                signals = json.load(f)
+        except Exception as e:
+            print(f"Error reading signals.json in evaluator: {e}")
+            return load_evaluations()
+
         store = load_evaluations()
-        store["summary"] = compute_global_summary(store.get("evaluations", {}))
+        evals = store.get("evaluations", {})
+
+        # Process only the most recent signals (default 15) to keep CPU/RAM ultra-light on E2.1.Micro
+        recent_signals = list(reversed(signals))[:max_signals_to_eval]
+        ai_calls_this_run = 0
+
+        for sig in recent_signals:
+            sig_id = sig.get("id")
+            if not sig_id:
+                parsed = parse_signal_record(sig)
+                if not parsed:
+                    continue
+                sig_id = parsed["id"]
+
+            existing = evals.get(sig_id)
+            if existing and existing.get("is_final") and not force_recalculate:
+                continue
+
+            # Throttle active evaluations to once every 5 minutes unless forced
+            if existing and not force_recalculate:
+                if (time.time() - existing.get("last_evaluated", 0)) < 300:
+                    continue
+
+            try:
+                allow_ai = force_recalculate and (ai_calls_this_run < 2)
+                res = evaluate_single_signal(sig, existing_eval=existing, force_ai=allow_ai)
+                if res:
+                    if res.get("ai_evaluation") and not (existing or {}).get("ai_evaluation"):
+                        ai_calls_this_run += 1
+                    evals[sig_id] = res
+                    # Incremental save so evaluations.json is always available immediately
+                    store["evaluations"] = evals
+                    store["summary"] = compute_global_summary(evals)
+                    store["last_run"] = time.time()
+                    save_evaluations(store)
+                # Gentle pause to avoid CPU spike on 1-OCPU VM
+                time.sleep(1.0)
+            except Exception as e:
+                print(f"Error evaluating signal {sig_id}: {e}")
+
+        store["evaluations"] = evals
+        store["summary"] = compute_global_summary(evals)
         store["last_run"] = time.time()
         save_evaluations(store)
         return store
-
-    try:
-        with open(SIGNALS_FILE, "r") as f:
-            signals = json.load(f)
-    except Exception as e:
-        print(f"Error reading signals.json in evaluator: {e}")
-        return load_evaluations()
-
-    store = load_evaluations()
-    evals = store.get("evaluations", {})
-    now_ts = time.time()
-
-    # Process most recent signals first
-    recent_signals = list(reversed(signals))[:max_signals_to_eval]
-
-    for sig in recent_signals:
-        sig_id = sig.get("id")
-        if not sig_id:
-            parsed = parse_signal_record(sig)
-            if not parsed:
-                continue
-            sig_id = parsed["id"]
-
-        existing = evals.get(sig_id)
-        if existing and existing.get("is_final") and not force_recalculate:
-            continue
-
-        # Throttle active evaluations to once every 3 minutes unless forced
-        if existing and not force_recalculate:
-            if (now_ts - existing.get("last_evaluated", 0)) < 180:
-                continue
-
+    finally:
         try:
-            res = evaluate_single_signal(sig, existing_eval=existing, force_ai=force_recalculate)
-            if res:
-                evals[sig_id] = res
-        except Exception as e:
-            print(f"Error evaluating signal {sig_id}: {e}")
-
-    store["evaluations"] = evals
-    store["summary"] = compute_global_summary(evals)
-    store["last_run"] = now_ts
-    save_evaluations(store)
-    return store
+            if os.path.exists(lock_file):
+                os.remove(lock_file)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
     print("Running NotifyInvest Alert Accuracy Evaluator...")
-    result = evaluate_all_signals(force_recalculate=True)
+    result = evaluate_all_signals(force_recalculate=True, max_signals_to_eval=15)
     print("Summary:", json.dumps(result.get("summary", {}), indent=2, ensure_ascii=False))
