@@ -157,12 +157,15 @@ async def _analyze_with_gemini_3_8_live(ticker, title, summary):
         await ws.send(json.dumps(client_content_payload))
 
         # 3. Asynchronous reasoning loop monitoring interactionStatus (IN_PROGRESS vs IDLE).
-        # With Extended Thinking, turnComplete=True may arrive with interactionStatus=IN_PROGRESS
-        # while background reasoning continues. We use a short 4s idle window after any turnComplete
-        # so we capture all follow-up background frames without ever hanging for 60s.
-        seen_turn_complete = False
+        # According to the Gemini 3.8 Live Extended Thinking protocol:
+        # - interactionStatus is always sent alongside turnComplete.
+        # - When the model gives an initial verbal cue ("Deixe-me analisar...") and starts
+        #   background reasoning, it sends turnComplete=True with interactionStatus="IN_PROGRESS".
+        # - While IN_PROGRESS, background reasoning may take 5-20s before streaming the final answer.
+        # - Once the final answer finishes, it sends turnComplete=True with interactionStatus="IDLE".
+        last_status = "IN_PROGRESS"
         while True:
-            recv_timeout = 4.0 if seen_turn_complete else 25.0
+            recv_timeout = 25.0 if "IN_PROGRESS" in last_status else 5.0
             try:
                 raw_msg = await asyncio.wait_for(ws.recv(), timeout=recv_timeout)
             except asyncio.TimeoutError:
@@ -195,17 +198,17 @@ async def _analyze_with_gemini_3_8_live(ticker, title, summary):
             # 3. Monitor interactionStatus (IN_PROGRESS vs IDLE)
             raw_status = sc.get("interactionStatus") or sc.get("interaction_status") or ""
             status_str = str(raw_status).upper()
+            if status_str:
+                last_status = status_str
+
             turn_complete = bool(sc.get("turnComplete") or sc.get("turn_complete"))
-            if turn_complete:
-                seen_turn_complete = True
 
             if "IDLE" in status_str:
                 break
             elif "IN_PROGRESS" in status_str:
-                # Background extended thinking is still running; keep listening with 4s window after turnComplete
+                # Background extended thinking is actively running; keep waiting (up to 25s) for the next turn
                 continue
-            elif turn_complete and not status_str:
-                # Fallback if server frame omits interactionStatus
+            elif turn_complete and "IN_PROGRESS" not in last_status:
                 break
 
     combined_sections = []
@@ -224,9 +227,10 @@ def analyze_news(ticker, title, summary):
     Two-stage news analysis pipeline:
     1. Stage 1 (Deep Financial Reasoning): Uses 'gemini-3.8-live-extended-thinking' via Live API
        monitoring asynchronous interaction_status (IN_PROGRESS -> IDLE).
-    2. Stage 2 (Structured JSON Formatting): Sends the Gemini 3.8 analysis to Gemma 4
-       ('gemma-4-31b-it' with fallback to 'gemma-4-26b-a4b-it') to produce the strict JSON output.
+    2. Stage 2 (Structured JSON Formatting): Sends the Gemini 3.8 analysis to Gemma
+       ('gemma-4-31b-it' -> 'gemma-4-26b-a4b-it' -> 'gemma-3-27b-it') to produce the strict JSON output.
     """
+    import time as _time
     try:
         client = configure_genai()
     except Exception as e:
@@ -240,18 +244,19 @@ def analyze_news(ticker, title, summary):
         live_analysis_text = asyncio.run(
             asyncio.wait_for(
                 _analyze_with_gemini_3_8_live(ticker, title, summary),
-                timeout=35.0
+                timeout=55.0
             )
         )
         if live_analysis_text:
-            print(f"[{ticker}] Gemini 3.8 Extended Thinking output captured ({len(live_analysis_text)} chars).", flush=True)
+            preview = live_analysis_text.replace("\n", " ")[:220]
+            print(f"[{ticker}] Gemini 3.8 Extended Thinking output captured ({len(live_analysis_text)} chars): {preview}...", flush=True)
         else:
             print(f"[{ticker}] Gemini 3.8 returned empty output; Gemma will analyze directly.", flush=True)
     except Exception as live_err:
         print(f"Warning: gemini-3.8-live-extended-thinking stage failed ({live_err}). Falling back to direct Gemma analysis...", flush=True)
         live_analysis_text = ""
 
-    # Stage 2: Gemma 4 Structured Output Extraction (or fallback direct analysis)
+    # Stage 2: Gemma Structured Output Extraction (or fallback direct analysis)
     if live_analysis_text:
         prompt = f"""
     You are a financial data structurer for the Brazilian Stock Market (B3).
@@ -260,9 +265,8 @@ def analyze_news(ticker, title, summary):
     News Title: {title}
     News Summary: {summary}
 
-    --- GEMINI 3.8 EXTENDED THINKING ANALYSIS ---
+    [GEMINI 3.8 EXTENDED THINKING ANALYSIS]
     {live_analysis_text}
-    ---------------------------------------------
 
     Task:
     Convert the senior analyst's evaluation above into the exact JSON structure below:
@@ -302,24 +306,19 @@ def analyze_news(ticker, title, summary):
     }}
     """
 
-    try:
-        # Note: gemma-4-31b-it throws HTTP 500 INTERNAL when response_mime_type="application/json" is set
-        response = client.models.generate_content(
-            model='gemma-4-31b-it',
-            contents=prompt
-        )
-        return _parse_json_object(response.text)
-    except Exception as e:
-        print(f"Warning: gemma-4-31b-it failed ({e}), falling back to gemma-4-26b-a4b-it...")
+    for model_name in ('gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemma-3-27b-it'):
         try:
             response = client.models.generate_content(
-                model='gemma-4-26b-a4b-it',
+                model=model_name,
                 contents=prompt
             )
             return _parse_json_object(response.text)
-        except Exception as fallback_err:
-            print(f"Error structuring/analyzing with Gemma: {fallback_err}")
-            return {"signal": "HOLD", "sentiment": "NEUTRAL", "reason": "Erro na análise AI"}
+        except Exception as e:
+            print(f"Warning: {model_name} failed ({e}), trying next model...", flush=True)
+            _time.sleep(1.5)
+            continue
+
+    return {"signal": "HOLD", "sentiment": "NEUTRAL", "reason": "Erro na análise AI"}
 
 
 def evaluate_alert_reason(
