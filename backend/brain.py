@@ -62,6 +62,14 @@ def configure_live_genai():
 
 def _parse_json_object(raw_text):
     text = raw_text.replace("```json", "").replace("```", "").strip()
+    candidates = [m.group(0) for m in re.finditer(r"\{[^{}]*\}", text, re.DOTALL)]
+    for cand in reversed(candidates):
+        try:
+            obj = json.loads(cand)
+            if isinstance(obj, dict) and ("signal" in obj or "sentiment" in obj):
+                return obj
+        except Exception:
+            continue
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if match:
         text = match.group(0)
@@ -324,8 +332,8 @@ async def _analyze_with_gemini_3_8_live(ticker, title, summary):
 
 def _extract_interaction_output_text(data):
     """
-    Extracts the final model text and a summary of executed agent steps (such as
-    google_search, url_context, thought) from a v1beta/interactions response object.
+    Extracts the final model text and a summary of executed agent steps/outputs (such as
+    google_search, url_context, browse, thought) from a v1beta/interactions response object.
     """
     if not isinstance(data, dict):
         return "", []
@@ -333,28 +341,53 @@ def _extract_interaction_output_text(data):
     tool_steps_used = []
     text_parts = []
 
+    def _record_tool_item(item):
+        if not isinstance(item, dict):
+            return
+        itype = item.get("type") or ""
+        name = item.get("name") or item.get("tool_name") or ""
+        queries = item.get("queries") or item.get("query")
+        urls = item.get("urls") or item.get("url")
+        if itype and itype not in ("model_output", "user_input", "text"):
+            label = f"{itype}:{name}" if name else itype
+            if queries:
+                label += f"({queries})"
+            elif urls:
+                label += f"({urls})"
+            tool_steps_used.append(label)
+
     for step in data.get("steps") or []:
         if not isinstance(step, dict):
             continue
+        _record_tool_item(step)
         stype = step.get("type") or ""
-        if stype and stype not in ("model_output", "user_input"):
-            tool_steps_used.append(stype)
-        if stype == "model_output":
-            content = step.get("content")
-            if isinstance(content, list):
-                for item in content:
-                    if isinstance(item, dict) and item.get("text"):
+        content = step.get("content")
+        if isinstance(content, list):
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                _record_tool_item(item)
+                if stype == "model_output" and item.get("text"):
+                    text_parts.append(item["text"])
+        elif stype == "model_output" and isinstance(step.get("text"), str):
+            text_parts.append(step["text"])
+
+    for out in data.get("outputs") or []:
+        if not isinstance(out, dict):
+            continue
+        _record_tool_item(out)
+        content = out.get("content")
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict):
+                    _record_tool_item(item)
+                    if not text_parts and item.get("text"):
                         text_parts.append(item["text"])
-            elif isinstance(step.get("text"), str):
-                text_parts.append(step["text"])
+        if out.get("text") and (out.get("type") in (None, "", "text", "model_output")):
+            text_parts.append(out["text"])
 
     if not text_parts and isinstance(data.get("output_text"), str):
         text_parts.append(data["output_text"])
-
-    if not text_parts:
-        for out in data.get("outputs") or []:
-            if isinstance(out, dict) and out.get("text"):
-                text_parts.append(out["text"])
 
     return "\n".join(text_parts).strip(), tool_steps_used
 
@@ -364,8 +397,8 @@ def _analyze_with_antigravity_argon(ticker, title, summary, url=""):
     Calls the Managed Agent 'antigravity-preview-09-2026' configured with
     agent_config={'type': 'antigravity', 'model': 'gemini-4-argon'} via the
     Gemini Interactions REST API (v1beta/interactions).
-    Runs inside Google's remote Linux sandbox with 'url_context' and 'google_search'
-    enabled, consuming zero CPU/RAM on the local Oracle VM.
+    Runs inside Google's remote Linux sandbox with mandatory 'url_context' and
+    'google_search' steps, consuming zero CPU/RAM on the local Oracle VM.
     """
     import requests
     import time as _time
@@ -377,26 +410,44 @@ def _analyze_with_antigravity_argon(ticker, title, summary, url=""):
         "Api-Revision": "2026-05-20",
     }
 
-    url_line = f"Link da Notícia (use url_context se precisar ler o texto completo): {url}\n" if url else ""
+    if url:
+        url_step_instruction = (
+            f"Link da Notícia: {url}\n\n"
+            f"REGRAS OBRIGATÓRIAS DE EXECUÇÃO (NÃO PULE NENHUMA ETAPA):\n"
+            f"1. LEITURA INTEGRAL DA URL (OBRIGATÓRIO): Antes de emitir qualquer opinião, você DEVE OBRIGATORIAMENTE "
+            f"usar a ferramenta de leitura de URL (`url_context` / `browse`) para abrir e ler o conteúdo completo de {url}. "
+            f"É proibido decidir apenas com base no título ou no resumo do RSS.\n"
+            f"2. PESQUISA DE CONTEXTO NA B3 (OBRIGATÓRIO): Você DEVE OBRIGATORIAMENTE usar a ferramenta de busca (`google_search`) "
+            f"para pesquisar o contexto recente da empresa {ticker} na B3 (últimos resultados, momento operacional, patamar recente "
+            f"da ação e como o mercado está avaliando {ticker}).\n"
+        )
+    else:
+        url_step_instruction = (
+            f"REGRAS OBRIGATÓRIAS DE EXECUÇÃO (NÃO PULE NENHUMA ETAPA):\n"
+            f"1. PESQUISA DA NOTÍCIA E CONTEXTO NA B3 (OBRIGATÓRIO): Como o link direto não foi informado, você DEVE OBRIGATORIAMENTE "
+            f"usar a ferramenta de busca (`google_search`) para buscar os detalhes completos dessa notícia e o contexto recente "
+            f"da empresa {ticker} na B3 antes de emitir qualquer opinião.\n"
+        )
+
     prompt_input = (
         f"Você é um analista financeiro sênior especialista na Bolsa de Valores do Brasil (B3).\n"
-        f"Analise a seguinte notícia sobre a ação {ticker}:\n\n"
-        f"Título: {title}\n"
-        f"Resumo: {summary}\n"
-        f"{url_line}\n"
-        f"Instruções:\n"
-        f"1. Se o link da notícia estiver disponível e o resumo for curto ou incompleto, você pode usar `url_context` "
-        f"para ler a matéria completa, ou `google_search` para verificar o contexto recente de {ticker} na B3.\n"
-        f"2. Avalie o sentimento da notícia para {ticker} (POSITIVE, NEGATIVE ou NEUTRAL).\n"
-        f"3. Defina o sinal de operação (BUY, SELL ou HOLD, sendo conservador).\n"
-        f"4. Estime o impacto percentual no preço da ação no curto prazo (ex: '+2%', '-3%', '0%').\n"
-        f"5. Escreva uma justificativa concisa de no máximo 1 frase em português.\n\n"
+        f"Sua análise será usada para tomada de decisão real de investimento na ação {ticker}.\n\n"
+        f"Dados iniciais do feed RSS:\n"
+        f"- Ativo (B3): {ticker}\n"
+        f"- Título: {title}\n"
+        f"- Resumo inicial (incompleto): {summary}\n"
+        f"{url_step_instruction}"
+        f"3. ANÁLISE FUNDAMENTADA: Cruzando os fatos completos lidos na matéria integral com o contexto atual de {ticker} na B3:\n"
+        f"   - Avalie o sentimento real para {ticker} (POSITIVE, NEGATIVE ou NEUTRAL).\n"
+        f"   - Defina o sinal de operação (BUY, SELL ou HOLD, sendo criterioso e conservador).\n"
+        f"   - Estime o impacto percentual esperado no curto prazo (ex: '+2%', '-3%', '0%').\n"
+        f"   - Escreva em `reason` uma síntese de 1 a 2 frases em português citando os dados concretos apurados no texto completo da notícia e no contexto da empresa.\n\n"
         f"Responda ao final OBRIGATORIAMENTE com um objeto JSON válido exatamente neste formato:\n"
         f"{{\n"
         f'  "signal": "BUY/SELL/HOLD",\n'
         f'  "sentiment": "POSITIVE/NEGATIVE/NEUTRAL",\n'
         f'  "impact": "+/-X%",\n'
-        f'  "reason": "Resumo conciso do motivo em 1 frase em pt-br"\n'
+        f'  "reason": "Síntese fundamentada com os fatos da matéria completa e contexto de {ticker} na B3"\n'
         f"}}"
     )
 
