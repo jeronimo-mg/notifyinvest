@@ -322,13 +322,136 @@ async def _analyze_with_gemini_3_8_live(ticker, title, summary):
     return ""
 
 
-def analyze_news(ticker, title, summary):
+def _extract_interaction_output_text(data):
     """
-    Two-stage news analysis pipeline:
-    1. Stage 1 (Deep Financial Reasoning): Uses 'gemini-3.8-live-extended-thinking' (with automatic
-       Live fallback to 'gemini-3.8-live') via Live API monitoring interaction_status (IN_PROGRESS -> IDLE).
-    2. Stage 2 (Structured JSON Formatting): Sends the Gemini 3.8 analysis to Gemma 4
-       ('gemma-4-31b-it' and 'gemma-4-26b-a4b-it' with multi-round backoff retries) to produce strict JSON.
+    Extracts the final model text and a summary of executed agent steps (such as
+    google_search, url_context, thought) from a v1beta/interactions response object.
+    """
+    if not isinstance(data, dict):
+        return "", []
+
+    tool_steps_used = []
+    text_parts = []
+
+    for step in data.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        stype = step.get("type") or ""
+        if stype and stype not in ("model_output", "user_input"):
+            tool_steps_used.append(stype)
+        if stype == "model_output":
+            content = step.get("content")
+            if isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and item.get("text"):
+                        text_parts.append(item["text"])
+            elif isinstance(step.get("text"), str):
+                text_parts.append(step["text"])
+
+    if not text_parts and isinstance(data.get("output_text"), str):
+        text_parts.append(data["output_text"])
+
+    if not text_parts:
+        for out in data.get("outputs") or []:
+            if isinstance(out, dict) and out.get("text"):
+                text_parts.append(out["text"])
+
+    return "\n".join(text_parts).strip(), tool_steps_used
+
+
+def _analyze_with_antigravity_argon(ticker, title, summary, url=""):
+    """
+    Calls the Managed Agent 'antigravity-preview-09-2026' configured with
+    agent_config={'type': 'antigravity', 'model': 'gemini-4-argon'} via the
+    Gemini Interactions REST API (v1beta/interactions).
+    Runs inside Google's remote Linux sandbox with 'url_context' and 'google_search'
+    enabled, consuming zero CPU/RAM on the local Oracle VM.
+    """
+    import requests
+    import time as _time
+
+    endpoint = "https://generativelanguage.googleapis.com/v1beta/interactions"
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": API_KEY,
+        "Api-Revision": "2026-05-20",
+    }
+
+    url_line = f"Link da Notícia (use url_context se precisar ler o texto completo): {url}\n" if url else ""
+    prompt_input = (
+        f"Você é um analista financeiro sênior especialista na Bolsa de Valores do Brasil (B3).\n"
+        f"Analise a seguinte notícia sobre a ação {ticker}:\n\n"
+        f"Título: {title}\n"
+        f"Resumo: {summary}\n"
+        f"{url_line}\n"
+        f"Instruções:\n"
+        f"1. Se o link da notícia estiver disponível e o resumo for curto ou incompleto, você pode usar `url_context` "
+        f"para ler a matéria completa, ou `google_search` para verificar o contexto recente de {ticker} na B3.\n"
+        f"2. Avalie o sentimento da notícia para {ticker} (POSITIVE, NEGATIVE ou NEUTRAL).\n"
+        f"3. Defina o sinal de operação (BUY, SELL ou HOLD, sendo conservador).\n"
+        f"4. Estime o impacto percentual no preço da ação no curto prazo (ex: '+2%', '-3%', '0%').\n"
+        f"5. Escreva uma justificativa concisa de no máximo 1 frase em português.\n\n"
+        f"Responda ao final OBRIGATORIAMENTE com um objeto JSON válido exatamente neste formato:\n"
+        f"{{\n"
+        f'  "signal": "BUY/SELL/HOLD",\n'
+        f'  "sentiment": "POSITIVE/NEGATIVE/NEUTRAL",\n'
+        f'  "impact": "+/-X%",\n'
+        f'  "reason": "Resumo conciso do motivo em 1 frase em pt-br"\n'
+        f"}}"
+    )
+
+    payload = {
+        "agent": "antigravity-preview-09-2026",
+        "input": prompt_input,
+        "environment": "remote",
+        "agent_config": {
+            "type": "antigravity",
+            "model": "gemini-4-argon",
+        },
+        "tools": [
+            {"type": "google_search"},
+            {"type": "url_context"},
+        ],
+    }
+
+    resp = requests.post(endpoint, headers=headers, json=payload, timeout=180)
+    if resp.status_code >= 400:
+        raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:400]}")
+
+    data = resp.json()
+    interaction_id = data.get("id")
+    status = str(data.get("status") or "").lower()
+
+    # If the interaction is running asynchronously, poll until completion
+    poll_start = _time.time()
+    while status in ("in_progress", "running", "pending") and interaction_id:
+        if (_time.time() - poll_start) > 150:
+            raise TimeoutError(f"Antigravity interaction {interaction_id} timed out after 150s")
+        _time.sleep(4.0)
+        poll_resp = requests.get(f"{endpoint}/{interaction_id}", headers=headers, timeout=30)
+        if poll_resp.status_code >= 400:
+            raise RuntimeError(f"Poll HTTP {poll_resp.status_code}: {poll_resp.text[:300]}")
+        data = poll_resp.json()
+        status = str(data.get("status") or "").lower()
+
+    output_text, tools_used = _extract_interaction_output_text(data)
+    usage = data.get("usage") or {}
+    print(
+        f"[{ticker}] antigravity-preview-09-2026 (gemini-4-argon) finished | "
+        f"status={status or 'completed'} | steps={tools_used} | usage={usage}",
+        flush=True,
+    )
+    return output_text
+
+
+def analyze_news(ticker, title, summary, url=""):
+    """
+    News analysis pipeline for B3 stocks:
+    1. Primary: Uses 'antigravity-preview-09-2026' with agent_config.model='gemini-4-argon'
+       (supporting url_context and google_search in Google's remote sandbox) to analyze the news
+       and return the structured JSON output directly.
+    2. Fallback: If Antigravity returns unstructured text or fails, uses Gemini 3.8 Live Extended Thinking
+       + Gemma 4 ('gemma-4-31b-it' / 'gemma-4-26b-a4b-it') to guarantee a valid JSON output.
     """
     import time as _time
     try:
@@ -337,35 +460,69 @@ def analyze_news(ticker, title, summary):
         print(f"FATAL: Could not initialize GenAI client. {e}", flush=True)
         raise e
 
-    # Stage 1: Gemini 3.8 Live Extended Thinking
-    live_analysis_text = ""
+    # Primary Flow: antigravity-preview-09-2026 with agent_config.model = "gemini-4-argon"
+    antigravity_text = ""
     try:
-        print(f"[{ticker}] Stage 1: Analyzing with gemini-3.8-live-extended-thinking (Live API)...", flush=True)
-        live_analysis_text = asyncio.run(
-            asyncio.wait_for(
-                _analyze_with_gemini_3_8_live(ticker, title, summary),
-                timeout=65.0
-            )
+        print(
+            f"[{ticker}] Analyzing with antigravity-preview-09-2026 (agent_config.model='gemini-4-argon')...",
+            flush=True,
         )
-        if live_analysis_text:
-            preview = live_analysis_text.replace("\n", " ")[:220]
-            print(f"[{ticker}] Gemini 3.8 Live output captured ({len(live_analysis_text)} chars): {preview}...", flush=True)
-        else:
-            print(f"[{ticker}] Gemini 3.8 Live returned no valid analysis; Gemma 4 will analyze directly.", flush=True)
-    except Exception as live_err:
-        print(f"Warning: gemini-3.8-live-extended-thinking stage failed ({live_err}). Falling back to direct Gemma 4 analysis...", flush=True)
-        live_analysis_text = ""
+        antigravity_text = _analyze_with_antigravity_argon(ticker, title, summary, url=url)
+        if antigravity_text:
+            preview = antigravity_text.replace("\n", " ")[:240]
+            print(f"[{ticker}] Antigravity (gemini-4-argon) output ({len(antigravity_text)} chars): {preview}", flush=True)
+            try:
+                parsed_direct = _parse_json_object(antigravity_text)
+                if (
+                    isinstance(parsed_direct, dict)
+                    and parsed_direct.get("signal") in ("BUY", "SELL", "HOLD")
+                    and parsed_direct.get("sentiment") in ("POSITIVE", "NEGATIVE", "NEUTRAL")
+                ):
+                    return parsed_direct
+            except Exception as parse_err:
+                print(
+                    f"[{ticker}] Antigravity output was not direct JSON ({parse_err}); "
+                    f"passing analysis to Gemma 4 for JSON structuring...",
+                    flush=True,
+                )
+    except Exception as ag_err:
+        print(
+            f"Warning: antigravity-preview-09-2026 (gemini-4-argon) failed ({ag_err}). "
+            f"Falling back to Gemini 3.8 Live Extended Thinking + Gemma 4...",
+            flush=True,
+        )
+        antigravity_text = ""
+
+    # Fallback Stage 1: Gemini 3.8 Live Extended Thinking (only if Antigravity did not return text)
+    live_analysis_text = antigravity_text
+    if not live_analysis_text:
+        try:
+            print(f"[{ticker}] Fallback Stage 1: Analyzing with gemini-3.8-live-extended-thinking (Live API)...", flush=True)
+            live_analysis_text = asyncio.run(
+                asyncio.wait_for(
+                    _analyze_with_gemini_3_8_live(ticker, title, summary),
+                    timeout=65.0
+                )
+            )
+            if live_analysis_text:
+                preview = live_analysis_text.replace("\n", " ")[:220]
+                print(f"[{ticker}] Gemini 3.8 Live output captured ({len(live_analysis_text)} chars): {preview}...", flush=True)
+            else:
+                print(f"[{ticker}] Gemini 3.8 Live returned no valid analysis; Gemma 4 will analyze directly.", flush=True)
+        except Exception as live_err:
+            print(f"Warning: gemini-3.8-live-extended-thinking stage failed ({live_err}). Falling back to direct Gemma 4 analysis...", flush=True)
+            live_analysis_text = ""
 
     # Stage 2: Gemma 4 Structured Output Extraction (or fallback direct analysis)
     if live_analysis_text:
         prompt = f"""
     You are a financial data structurer for the Brazilian Stock Market (B3).
-    Below is a news item about {ticker} and the in-depth analysis produced by our senior analyst model (Gemini 3.8 Live).
+    Below is a news item about {ticker} and the in-depth analysis produced by our senior analyst model.
 
     News Title: {title}
     News Summary: {summary}
 
-    [GEMINI 3.8 LIVE ANALYSIS]
+    [SENIOR ANALYST EVALUATION]
     {live_analysis_text}
 
     Task:
@@ -427,7 +584,7 @@ def analyze_news(ticker, title, summary):
                 continue
 
     if live_analysis_text:
-        print(f"[{ticker}] All Gemma 4 retries exhausted; extracting structured fields from Gemini 3.8 Live text.", flush=True)
+        print(f"[{ticker}] All Gemma 4 retries exhausted; extracting structured fields from analyst text.", flush=True)
         return _extract_structured_from_live_text(live_analysis_text)
 
     return {"signal": "HOLD", "sentiment": "NEUTRAL", "reason": "Erro na análise AI"}

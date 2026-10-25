@@ -226,7 +226,7 @@ def main():
                             CURRENT_MESSAGE = f"Waiting for Gemini API ({tickers[0]})..."
                             update_status(CURRENT_MESSAGE) # Force immediate update
                             
-                            analysis = analyze_news(tickers[0], title, summary)
+                            analysis = analyze_news(tickers[0], title, summary, url=link)
                             print(f"Analysis: {analysis}")
                             
                             
