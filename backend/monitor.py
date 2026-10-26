@@ -147,18 +147,17 @@ def main():
     
     seen_links = load_seen()
     
-    # Start Heartbeat & Background Evaluator
+    # Start Heartbeat thread (Evaluator runs sequentially inside the main loop when idle)
     import threading
     t = threading.Thread(target=heartbeat_loop, daemon=True)
     t.start()
-    eval_thread = threading.Thread(target=evaluator_loop, daemon=True)
-    eval_thread.start()
     
     # Prepare for multi-user support
     import json
     token_file = os.path.join(os.path.dirname(__file__), 'tokens.json')
 
     global CURRENT_MESSAGE
+    last_eval_run = time.time()
 
     while True:
                 # Load tokens dynamically (supports dict or list for migration)
