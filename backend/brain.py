@@ -392,13 +392,93 @@ def _extract_interaction_output_text(data):
     return "\n".join(text_parts).strip(), tool_steps_used
 
 
-def _analyze_with_antigravity_argon(ticker, title, summary, url=""):
+def _get_b3_realtime_snapshot(ticker):
+    """
+    Fetches a lightweight real-time B3 snapshot (current price, previous close,
+    intraday change %, and whether the B3 market is open or closed in BRT)
+    so the analyst model can distinguish already-priced-in moves from future residual upside/downside.
+    """
+    import datetime
+    import requests
+
+    clean = ticker.strip().upper().replace(".SA", "")
+    symbol = f"{clean}.SA"
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    brt_tz = datetime.timezone(datetime.timedelta(hours=-3))
+    brt_now = datetime.datetime.now(brt_tz)
+    weekday = brt_now.weekday()  # 0=Mon .. 6=Sun
+    hm = brt_now.hour * 60 + brt_now.minute
+    is_open = (weekday < 5) and (10 * 60 <= hm <= 17 * 60 + 55)
+    market_status = (
+        "PREGÃO ABERTO (Intradia)"
+        if is_open
+        else "PREGÃO FECHADO (Fora do horário de negociação / Pré-abertura)"
+    )
+    brt_str = brt_now.strftime("%Y-%m-%d %H:%M BRT")
+
+    for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
+        try:
+            url = f"https://{host}/v8/finance/chart/{symbol}?interval=1d&range=5d"
+            r = requests.get(url, headers=headers, timeout=6)
+            if r.status_code != 200:
+                continue
+            res = r.json().get("chart", {}).get("result")
+            if not res:
+                continue
+            meta = res[0].get("meta", {})
+            closes = [
+                c
+                for c in (res[0].get("indicators", {}).get("quote", [{}])[0].get("close") or [])
+                if c is not None
+            ]
+            price = meta.get("regularMarketPrice") or (closes[-1] if closes else None)
+            prev_close = closes[-2] if len(closes) >= 2 else meta.get("chartPreviousClose")
+            day_change_pct = (
+                ((float(price) - float(prev_close)) / float(prev_close) * 100.0)
+                if (price and prev_close)
+                else 0.0
+            )
+            price_val = round(float(price), 2) if price else None
+            prev_val = round(float(prev_close), 2) if prev_close else None
+            chg_val = round(float(day_change_pct), 2)
+            summary_line = (
+                f"Horário: {brt_str} | Status B3: {market_status} | "
+                f"Cotação atual de {clean}: R$ {price_val:.2f} "
+                f"(Fechamento anterior: R$ {prev_val:.2f} | Variação já ocorrida na sessão: {chg_val:+.2f}%)"
+                if (price_val and prev_val)
+                else f"Horário: {brt_str} | Status B3: {market_status}"
+            )
+            return {
+                "price": price_val,
+                "prev_close": prev_val,
+                "day_change_pct": chg_val,
+                "is_market_open": is_open,
+                "market_status": market_status,
+                "brt_time": brt_str,
+                "summary_line": summary_line,
+            }
+        except Exception:
+            continue
+
+    return {
+        "price": None,
+        "prev_close": None,
+        "day_change_pct": 0.0,
+        "is_market_open": is_open,
+        "market_status": market_status,
+        "brt_time": brt_str,
+        "summary_line": f"Horário: {brt_str} | Status B3: {market_status}",
+    }
+
+
+def _analyze_with_antigravity_argon(ticker, title, summary, url="", b3_snapshot=None):
     """
     Calls the Managed Agent 'antigravity-preview-09-2026' configured with
     agent_config={'type': 'antigravity', 'model': 'gemini-4-argon'} via the
     Gemini Interactions REST API (v1beta/interactions).
-    Runs inside Google's remote Linux sandbox with mandatory 'url_context' and
-    'google_search' steps, consuming zero CPU/RAM on the local Oracle VM.
+    Runs inside Google's remote Linux sandbox with mandatory 'url_context',
+    'google_search', and Pre-Move / Residual Future Impact verification.
     """
     import requests
     import time as _time
@@ -410,6 +490,9 @@ def _analyze_with_antigravity_argon(ticker, title, summary, url=""):
         "Api-Revision": "2026-05-20",
     }
 
+    snap = b3_snapshot or _get_b3_realtime_snapshot(ticker)
+    snap_line = snap.get("summary_line", "")
+
     if url:
         url_step_instruction = (
             f"Link da Notícia: {url}\n\n"
@@ -417,9 +500,9 @@ def _analyze_with_antigravity_argon(ticker, title, summary, url=""):
             f"1. LEITURA INTEGRAL DA URL (OBRIGATÓRIO): Antes de emitir qualquer opinião, você DEVE OBRIGATORIAMENTE "
             f"usar a ferramenta de leitura de URL (`url_context` / `browse`) para abrir e ler o conteúdo completo de {url}. "
             f"É proibido decidir apenas com base no título ou no resumo do RSS.\n"
-            f"2. PESQUISA DE CONTEXTO NA B3 (OBRIGATÓRIO): Você DEVE OBRIGATORIAMENTE usar a ferramenta de busca (`google_search`) "
+            f"2. PESQUISA DE CONTEXTO E PRECIFICAÇÃO NA B3 (OBRIGATÓRIO): Você DEVE OBRIGATORIAMENTE usar a ferramenta de busca (`google_search`) "
             f"para pesquisar o contexto recente da empresa {ticker} na B3 (últimos resultados, momento operacional, patamar recente "
-            f"da ação e como o mercado está avaliando {ticker}).\n"
+            f"da ação e se o mercado já reagiu a essa notícia).\n"
         )
     else:
         url_step_instruction = (
@@ -431,23 +514,34 @@ def _analyze_with_antigravity_argon(ticker, title, summary, url=""):
 
     prompt_input = (
         f"Você é um analista financeiro sênior especialista na Bolsa de Valores do Brasil (B3).\n"
-        f"Sua análise será usada para tomada de decisão real de investimento na ação {ticker}.\n\n"
+        f"OBJETIVO CRÍTICO DO SISTEMA: Prever movimentações FUTURAS no preço de {ticker} (valorização ou desvalorização que AINDA VAI ACONTECER) "
+        f"para que o investidor possa agir (comprar ou vender) ANTES de o movimento se completar.\n\n"
         f"Dados iniciais do feed RSS:\n"
         f"- Ativo (B3): {ticker}\n"
         f"- Título: {title}\n"
         f"- Resumo inicial (incompleto): {summary}\n"
+        f"- Snapshot em Tempo Real da B3: {snap_line}\n"
         f"{url_step_instruction}"
-        f"3. ANÁLISE FUNDAMENTADA: Cruzando os fatos completos lidos na matéria integral com o contexto atual de {ticker} na B3:\n"
-        f"   - Avalie o sentimento real para {ticker} (POSITIVE, NEGATIVE ou NEUTRAL).\n"
-        f"   - Defina o sinal de operação (BUY, SELL ou HOLD, sendo criterioso e conservador).\n"
-        f"   - Estime o impacto percentual esperado no curto prazo (ex: '+2%', '-3%', '0%').\n"
-        f"   - Escreva em `reason` uma síntese de 1 a 2 frases em português citando os dados concretos apurados no texto completo da notícia e no contexto da empresa.\n\n"
+        f"3. BLINDAGEM DE PRECIFICAÇÃO E MOVIMENTO FUTURO RESIDUAL (CRÍTICO):\n"
+        f"   - A) FILTRO ANTI-ATRASO (NOTÍCIA RETROSPECTIVA = HOLD): Se a matéria for apenas explicando por que a ação JÁ subiu ou JÁ caiu no pregão "
+        f"(ex.: 'Ações sobem/caem X% após...', 'Entenda por que o papel disparou/desabou hoje'), ou se a variação já ocorrida na sessão atual "
+        f"já absorveu integralmente o impacto esperado do fato, NÃO emita compra no topo nem venda no fundo! Nesses casos, retorne obrigatoriamente "
+        f"`\"signal\": \"HOLD\"` e `\"impact\": \"0%\"`, explicando em `\"reason\"` que o movimento já foi precificado pelo mercado.\n"
+        f"   - B) CÁLCULO DE IMPACTO FUTURO RESIDUAL: O campo `\"signal\"` (`BUY` ou `SELL`) e o campo `\"impact\"` (`+/-X%`) devem refletir "
+        f"EXCLUSIVAMENTE o potencial FUTURO ADICIONAL (upside ou downside residual) que AINDA resta acontecer a partir da cotação atual da B3, "
+        f"descontando o que a ação já variou hoje.\n"
+        f"   - C) JANELA DE PREGÃO: Se a notícia trouxer um fato relevante novo com o PREGÃO FECHADO (noite, madrugada, pré-abertura ou fim de semana), "
+        f"o evento ainda tem 0% de precificação no pregão e seu impacto ocorrerá na abertura do próximo pregão. Se o PREGÃO ESTIVER ABERTO, "
+        f"só emita `BUY` ou `SELL` se o catalisador for novo/estrutural e ainda restar movimento futuro relevante a ser capturado a partir do preço atual.\n"
+        f"4. FORMATO DE RESPOSTA:\n"
+        f"   - Escreva em `reason` uma síntese de 1 a 2 frases em português citando os dados concretos da matéria completa, o contexto de {ticker} na B3 "
+        f"e por que o impacto ainda não está (ou já está) precificado.\n\n"
         f"Responda ao final OBRIGATORIAMENTE com um objeto JSON válido exatamente neste formato:\n"
         f"{{\n"
         f'  "signal": "BUY/SELL/HOLD",\n'
         f'  "sentiment": "POSITIVE/NEGATIVE/NEUTRAL",\n'
         f'  "impact": "+/-X%",\n'
-        f'  "reason": "Síntese fundamentada com os fatos da matéria completa e contexto de {ticker} na B3"\n'
+        f'  "reason": "Síntese fundamentada com os fatos da matéria completa, contexto de {ticker} na B3 e avaliação de precificação futura"\n'
         f"}}"
     )
 
@@ -499,8 +593,8 @@ def analyze_news(ticker, title, summary, url=""):
     """
     News analysis pipeline for B3 stocks:
     1. Primary: Uses 'antigravity-preview-09-2026' with agent_config.model='gemini-4-argon'
-       (supporting url_context and google_search in Google's remote sandbox) to analyze the news
-       and return the structured JSON output directly.
+       (supporting url_context, google_search, and real-time B3 pre-move / residual impact analysis)
+       to analyze the news and return the structured JSON output directly.
     2. Fallback: If Antigravity returns unstructured text or fails, uses Gemini 3.8 Live Extended Thinking
        + Gemma 4 ('gemma-4-31b-it' / 'gemma-4-26b-a4b-it') to guarantee a valid JSON output.
     """
@@ -511,6 +605,10 @@ def analyze_news(ticker, title, summary, url=""):
         print(f"FATAL: Could not initialize GenAI client. {e}", flush=True)
         raise e
 
+    b3_snapshot = _get_b3_realtime_snapshot(ticker)
+    snap_line = b3_snapshot.get("summary_line", "")
+    print(f"[{ticker}] B3 Realtime Snapshot: {snap_line}", flush=True)
+
     # Primary Flow: antigravity-preview-09-2026 with agent_config.model = "gemini-4-argon"
     antigravity_text = ""
     try:
@@ -518,7 +616,9 @@ def analyze_news(ticker, title, summary, url=""):
             f"[{ticker}] Analyzing with antigravity-preview-09-2026 (agent_config.model='gemini-4-argon')...",
             flush=True,
         )
-        antigravity_text = _analyze_with_antigravity_argon(ticker, title, summary, url=url)
+        antigravity_text = _analyze_with_antigravity_argon(
+            ticker, title, summary, url=url, b3_snapshot=b3_snapshot
+        )
         if antigravity_text:
             preview = antigravity_text.replace("\n", " ")[:240]
             print(f"[{ticker}] Antigravity (gemini-4-argon) output ({len(antigravity_text)} chars): {preview}", flush=True)
@@ -551,7 +651,7 @@ def analyze_news(ticker, title, summary, url=""):
             print(f"[{ticker}] Fallback Stage 1: Analyzing with gemini-3.8-live-extended-thinking (Live API)...", flush=True)
             live_analysis_text = asyncio.run(
                 asyncio.wait_for(
-                    _analyze_with_gemini_3_8_live(ticker, title, summary),
+                    _analyze_with_gemini_3_8_live(ticker, title, f"{summary}\nSnapshot B3: {snap_line}"),
                     timeout=65.0
                 )
             )
@@ -568,10 +668,11 @@ def analyze_news(ticker, title, summary, url=""):
     if live_analysis_text:
         prompt = f"""
     You are a financial data structurer for the Brazilian Stock Market (B3).
-    Below is a news item about {ticker} and the in-depth analysis produced by our senior analyst model.
+    Below is a news item about {ticker}, its real-time B3 market snapshot, and the in-depth analysis produced by our senior analyst model.
 
     News Title: {title}
     News Summary: {summary}
+    B3 Snapshot: {snap_line}
 
     [SENIOR ANALYST EVALUATION]
     {live_analysis_text}
@@ -579,9 +680,9 @@ def analyze_news(ticker, title, summary, url=""):
     Task:
     Convert the senior analyst's evaluation above into the exact JSON structure below:
     1. "sentiment": POSITIVE, NEGATIVE, or NEUTRAL.
-    2. "signal": BUY, SELL, or HOLD (be conservative, following the analyst's conclusion).
-    3. "impact": estimated short-term price impact as a percentage (e.g. "+2%", "-5%", "0%").
-    4. "reason": a very short reason (max 1 sentence) in Portuguese summarizing the analyst's conclusion.
+    2. "signal": BUY, SELL, or HOLD (if the move is already priced in or retrospective, use HOLD).
+    3. "impact": estimated FUTURE residual short-term price impact as a percentage (e.g. "+2%", "-5%", "0%").
+    4. "reason": a concise summary (1-2 sentences) in Portuguese summarizing the analyst's conclusion and whether the impact is still ahead or already priced in.
 
     Output format (JSON only):
     {{
@@ -594,16 +695,17 @@ def analyze_news(ticker, title, summary, url=""):
     else:
         prompt = f"""
     You are a financial analyst specializing in the Brazilian Stock Market (B3).
-    Analyze the following news item related to the company {ticker}.
+    Analyze the following news item related to the company {ticker} to predict FUTURE price movements BEFORE they happen.
     
     News Title: {title}
     News Summary: {summary}
+    B3 Realtime Snapshot: {snap_line}
     
     Task:
     1. Determine the sentiment of the news regarding {ticker} (POSITIVE, NEGATIVE, NEUTRAL).
-    2. Suggest a trading signal (BUY, SELL, HOLD). Be conservative.
-    3. Estimate the potential short-term price impact as a percentage (e.g. "+2%", "-5%", "0%").
-    4. Provide a very short reason (max 1 sentence) in Portuguese.
+    2. Suggest a forward-looking trading signal (BUY, SELL, HOLD). If the news is merely explaining a move that ALREADY happened today in the B3 Snapshot, output HOLD ("0%").
+    3. Estimate the remaining FUTURE short-term price impact as a percentage (e.g. "+2%", "-5%", "0%").
+    4. Provide a concise reason (1-2 sentences) in Portuguese.
     
     Output format (JSON only):
     {{
