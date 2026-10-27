@@ -493,7 +493,18 @@ def _analyze_with_antigravity_argon(ticker, title, summary, url="", b3_snapshot=
     snap = b3_snapshot or _get_b3_realtime_snapshot(ticker)
     snap_line = snap.get("summary_line", "")
 
-    if url:
+    has_cvm_pdf_text = "[CONTEÚDO INTEGRAL EXTRAÍDO DO DOCUMENTO OFICIAL CVM]:" in (summary or "")
+    if has_cvm_pdf_text:
+        url_step_instruction = (
+            f"Link do Documento Oficial CVM: {url}\n\n"
+            f"REGRAS OBRIGATÓRIAS DE EXECUÇÃO (NÃO PULE NENHUMA ETAPA):\n"
+            f"1. LEITURA DO DOCUMENTO OFICIAL CVM: O texto integral extraído do PDF oficial protocolado na CVM já está incluído acima. "
+            f"Analise todos os números, valores e condições descritos no documento.\n"
+            f"2. PESQUISA DE CONTEXTO E PRECIFICAÇÃO NA B3 (OBRIGATÓRIO): Você DEVE OBRIGATORIAMENTE usar a ferramenta de busca (`google_search`) "
+            f"para pesquisar o contexto recente da empresa {ticker} na B3 (valor de mercado, últimos resultados, patamar recente "
+            f"da ação e se o mercado já reagiu a esse protocolo da CVM).\n"
+        )
+    elif url:
         url_step_instruction = (
             f"Link da Notícia: {url}\n\n"
             f"REGRAS OBRIGATÓRIAS DE EXECUÇÃO (NÃO PULE NENHUMA ETAPA):\n"
